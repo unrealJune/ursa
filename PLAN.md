@@ -98,8 +98,8 @@ What follows from it:
 | Content encryption | AES-256-GCM (aws-lc-rs), one key per chunk (derived from an account secret and the chunk's content) | Post-quantum as it stands: a 256-bit key keeps ~128 bits against Grover. Hardware AES on every phone and desktop; S1 measured 6.4 / 7.5 GB/s seal / open on one Apple M2 core. Each key encrypts exactly one plaintext, so nonces cannot repeat. aws-lc-rs also ships ML-KEM, so one library covers both halves. XChaCha20-Poly1305 is the fallback if a platform lacks AES instructions. |
 | Hashing / content IDs | BLAKE3 | Fast (SIMD, parallel), and **Bao** gives verified streaming: a range of a file can be checked without the whole thing. iroh-blobs is built on it. |
 | Key derivation | BLAKE3 `derive_key` / HKDF-SHA256 | |
-| Key wrapping across identities | HPKE (RFC 9180) with **X-Wing** (X25519 + ML-KEM-768) | Hybrid: breaks only if both break. X-Wing is the IETF combiner, small and audited implementations exist (libcrux). S3 checks whether aws-lc-rs's ML-KEM-768 and X25519 can build it, so one crypto library covers everything. |
-| Signatures (manifests, device certs, quota receipts) | Hybrid **Ed25519 + ML-DSA-65**, both must verify | Forgery needs a quantum computer *at signing-verification time*, which is not a harvest-later threat, so this is lower priority than the KEM; still cheap enough to do from day one and painful to retrofit. |
+| Key wrapping across identities | **X-Wing** (X25519 + ML-KEM-768) from **libcrux**, then HKDF-SHA256 into AES-256-GCM (HPKE single-shot shape) | Hybrid: breaks only if both break. libcrux is formally verified and the one choice that builds for native and the browser (aws-lc-rs cannot target wasm). S3: under 0.5 ms to wrap or unwrap anywhere; interoperates with RustCrypto and aws-lc-rs from the same seeds. X-Wing is a draft, so wrapped keys carry a version byte. |
+| Signatures (library-log commits, device certs, quota receipts) | Hybrid **Ed25519 (`ed25519-dalek`) + ML-DSA-65 (libcrux)**, both must verify | Forgery needs a quantum computer *at signing-verification time*, which is not a harvest-later threat, so this is lower priority than the KEM; still cheap enough to do from day one and painful to retrofit. S3: 0.2 ms to sign and 0.05 ms to verify on an iPhone-class core. A hybrid signature is 3.4 KB, so commits are signed, never individual files. |
 | Transport | iroh QUIC (TLS 1.3, Ed25519 node identity) | Node identity is classical. Acceptable: impersonating a node needs a live quantum attack and still yields only ciphertext. |
 
 **Never plain convergent encryption** (key = hash of the content). It deduplicates across
@@ -431,7 +431,7 @@ suite runs against each, and the app does not change between them.
 | S0 | What Ente gets right | Notes on Ente's backup edge cases (permissions, limited library, Live Photos, edits, HEIC/RAW, duplicates), timeline/album UX and key layout, written into this repo |
 | S1 | Chunk size, stripe size and `k`/`n` vs throughput | FastCDC + encrypt + RS-code + hash a 4 GB video on a phone-class ARM core and a desktop; table of GB/s by stripe size and code, chunking and cipher costs, degraded reads |
 | S2 | iroh bulk throughput | Parallel fetch from 6 nodes: loopback ceiling, throttled home-like uplinks, then our own nodes over the real internet; goodput by read strategy |
-| S3 | PQ libraries | X-Wing HPKE and ML-DSA-65 crates chosen, building on iOS, Android, wasm; wrap/unwrap timings |
+| S3 | PQ libraries | **Done 2026-11-23**: libcrux for X-Wing and ML-DSA-65 everywhere (builds for iOS, Android, browser); see `spikes/s3-pq` |
 | S4 | PQ transport | Can iroh's rustls config take `X25519MLKEM768`? Patch size if not |
 | S5 | iOS photo upload | How much a `BGProcessingTask` + background `URLSession` upload can move per night, and whether it must go over HTTP to the home node |
 
@@ -454,7 +454,13 @@ through two NATs and read at 841 Mbit/s; n0's public relays broke both the data 
 punching; on the home LAN the pods were only reachable through our relay. Still owed: nodes in
 several homes. Details: `spikes/s2-transfer/README.md`.
 
-S0, S3 and S5 shape Phase 1. S1 and S2 are not built on until Phase 3, but they run first
+**S3 done (2026-11-23).** `spikes/s3-pq`. RustCrypto, libcrux and aws-lc-rs all interoperate
+from the same seeds, and every operation is under 2 ms everywhere, so portability decided it:
+aws-lc-rs cannot build for the browser, which the web reader needs. Decided: libcrux for X-Wing
+and ML-DSA-65 on every platform, `ed25519-dalek` for Ed25519, aws-lc-rs kept for bulk AES-GCM on
+native platforms, all behind Ursa's own `crypto` module with the interop checks as tests.
+
+S0 and S5 shape Phase 1. S1 and S2 are not built on until Phase 3, but they run first
 anyway: parallel coded reads over iroh being fast is Ursa's reason to exist, and if the
 numbers are bad the design changes before anything sits on top of it. S4 can wait.
 
