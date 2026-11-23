@@ -65,7 +65,9 @@ jobs:
           key: wasip1
       - run: cargo build --release --target wasm32-wasip1
       - uses: bytecodealliance/actions/wasmtime/setup@v1
-      - run: wasmtime run target/wasm32-wasip1/release/s3-pq.wasm | sed 's/^# S3 results: wasm32 wasi/# S3 results: wasm32 (wasmtime)/' | tee s3-wasm32.md
+      - name: run under wasmtime
+        run: |
+          wasmtime run target/wasm32-wasip1/release/s3-pq.wasm | sed 's/^# S3 results: wasm32 wasi/# S3 results: wasm32 (wasmtime)/' | tee s3-wasm32.md
       - if: always()
         run: cat s3-wasm32.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
