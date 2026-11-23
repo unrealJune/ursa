@@ -1,0 +1,38 @@
+[package]
+name = "s3-pq"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Spike S3: post-quantum key wrapping and signatures, per library and platform"
+
+[features]
+default = ["rustcrypto", "libcrux"]
+rustcrypto = ["dep:x-wing", "dep:ml-dsa"]
+libcrux = ["dep:libcrux-kem", "dep:libcrux-ml-dsa"]
+# Needs CMake and a C toolchain; no wasm32-unknown-unknown support.
+aws-lc = ["dep:aws-lc-rs"]
+
+[dependencies]
+aes-gcm = "0.10"
+ed25519-dalek = { version = "3", features = ["rand_core"] }
+getrandom = "0.3"
+hkdf = "0.12"
+sha2 = "0.10"
+sha3 = "0.10"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+
+x-wing = { version = "0.1.1", optional = true, features = ["getrandom"] }
+ml-dsa = { version = "0.1.2", optional = true }
+libcrux-kem = { version = "0.0.11", optional = true }
+libcrux-ml-dsa = { version = "0.0.12", optional = true }
+aws-lc-rs = { version = "1.19", optional = true, features = ["unstable"] }
+
+[profile.release]
+codegen-units = 4
+
+# Browser builds (wasm32-unknown-unknown): every getrandom in the tree needs its JS backend.
+# 0.3 also needs RUSTFLAGS='--cfg getrandom_backend="wasm_js"'.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
