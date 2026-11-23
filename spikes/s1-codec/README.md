@@ -29,41 +29,69 @@ per chunk, which costs the same per byte plus a 16-byte tag per chunk.
 
 ## Results
 
-| Machine | File |
-| --- | --- |
-| Ryzen 9 4900HS laptop, **on battery (Balanced)**, quick run | [results/ryzen9-4900hs-battery-quick.md](results/ryzen9-4900hs-battery-quick.md) |
-| CI: Linux x86-64, Linux arm64, macOS arm64, Windows | pending (needs the GitHub repo) |
-| A real phone (Android arm64) | pending |
+| Machine | Cores | File |
+| --- | ---: | --- |
+| Apple M2 Pro VM (macOS CI): the stand-in for an iPhone's cores | 5 | [results/ci/s1-macos-arm64.md](results/ci/s1-macos-arm64.md) |
+| Azure Cobalt 100 / Neoverse N2 (Linux arm64 CI) | 2 | [results/ci/s1-linux-arm64.md](results/ci/s1-linux-arm64.md) |
+| Xeon Platinum 8573C (Linux x86-64 CI) | 2 | [results/ci/s1-linux-x86_64.md](results/ci/s1-linux-x86_64.md) |
+| Intel, Windows CI | 2 | [results/ci/s1-windows-x86_64.md](results/ci/s1-windows-x86_64.md) |
+| Ryzen 9 4900HS laptop, **on battery (Balanced)**, quick run | 16 | [results/ryzen9-4900hs-battery-quick.md](results/ryzen9-4900hs-battery-quick.md) |
+| A real phone (Android arm64) | | pending: CI builds the binary (`s1-codec-android-arm64` artifact) |
 
-## Findings so far (laptop on battery; ratios hold, absolute numbers are low)
+4 GiB through 4-of-6, 8 MiB stripes, ring AES-256-GCM, GB/s of plaintext:
 
-1. **The CPU is not the bottleneck on a desktop.** Through 4-of-6 with 8 MiB stripes: write
-   0.5 GB/s on one core and 2.0 GB/s on all of them; healthy read 0.7 and 3.6 GB/s; degraded
-   read 0.23 and 1.4 GB/s. One core writes at 4 Gbit/s, well past any home uplink. Whether
-   that holds on a phone is the open question.
-2. **Use ring's AES-256-GCM.** 1.4 GB/s per core against 0.5 for RustCrypto's AES-GCM and 0.6
-   for XChaCha20-Poly1305. (aws-lc-rs is likely faster still and worth one row later; it needs
-   CMake/NASM on Windows.)
-3. **Code in column slices, never whole shards.** Columns of an RS code are independent, so
-   the coder can work on a 64 KiB slice of every shard at a time. Whole-shard decoding fell out
-   of cache and stopped scaling (0.58 GB/s at 16 threads); 64 KiB slices reach 1.5 GB/s. The
-   same property is what lets a degraded read decode only the range it needs.
-4. **`reed-solomon-simd` has a fixed cost per decode call** (~0.5–0.8 ms here, independent of
-   size, from its error-locator transform over GF(2¹⁶)). Small slices pay it many times: 4 KiB
-   slices decode at 0.03 GB/s on one core. For codes this small (n ≤ 14) a GF(2⁸)
-   matrix code with SIMD multiply tables (the ISA-L / klauspost approach) computes the decode
-   matrix once per loss pattern and reuses it for every slice and stripe; it should be several
-   times faster on degraded reads. Worth a row before committing to a library. Encoding has no
-   such problem (13% of write time).
-5. **Hashing is the biggest write cost** (~half of single-core write time, BLAKE3 at 1.7 GB/s
-   on this throttled core). It is also what names every shard and what Bao verification will
-   use, so it stays; it parallelizes across shards for free.
-6. **Stripe size barely matters between 1 and 16 MiB**; 32 MiB is a little worse. The plan's
-   8 MiB stays. The choice can be made on network grounds (request count, tail latency) in S2.
-7. **The code barely matters for CPU.** 3-of-5, 4-of-6, 6-of-9 and 10-of-14 are within noise
-   of each other on writes and healthy reads. The choice is about overhead, fault tolerance and
-   how many hosts a pool has, not about speed.
-8. **FastCDC runs at ~1.2 GB/s per core** at every average size tried (256 KiB – 4 MiB). One file
-   is chunked on one core, which is still well above network speed. Media files never change
-   after capture, so they could skip CDC and use fixed chunks; documents and project trees are
-   where it pays.
+| Machine | write 1 core | healthy read 1 core | degraded read 1 core | write all cores | healthy read all | degraded read all |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Apple M2 Pro | 0.96 | 1.41 | 0.81 | 3.70 (5) | 5.79 (5) | 3.78 (5) |
+| Neoverse N2 | 0.64 | 0.93 | 0.54 | 1.26 (2) | 1.85 (2) | 1.08 (2) |
+| Xeon 8573C | 1.65 | 2.44 | 0.87 | 1.75 (2) | 2.68 (2) | 0.90 (2) |
+| Ryzen laptop, battery | 0.51 | 0.71 | 0.23 | 2.00 (16) | 3.58 (16) | 1.44 (16) |
+
+AES-256-GCM, one core, seal GB/s:
+
+| Machine | ring | RustCrypto `aes-gcm` | ring ChaCha20-Poly1305 | RustCrypto XChaCha20-Poly1305 |
+| --- | ---: | ---: | ---: | ---: |
+| Apple M2 Pro | **5.25** | 0.15 | 1.60 | 0.44 |
+| Neoverse N2 | **2.61** | 0.14 | 1.09 | 0.43 |
+| Xeon 8573C | **4.02** | 1.14 | 1.64 | 1.10 |
+| Ryzen laptop, battery | **1.42** | 0.51 | 0.97 | 0.61 |
+
+## Findings
+
+1. **The CPU is not the bottleneck, ARM included.** One Apple M2 core (the same family of
+   core as a recent iPhone's performance cores) writes 4-of-6 at 0.96 GB/s (7.7 Gbit/s), reads
+   at 1.4 GB/s, and reads with two shards lost at 0.8 GB/s; five cores give 3.7 / 5.8 / 3.8.
+   Home uplinks are 0.02–1 Gbit/s. A phone will spend its battery on the radio, not on this.
+   A real phone run is still owed (the Android binary is built).
+2. **ring's AES-256-GCM, decisively.** RustCrypto's `aes-gcm` runs in **software on ARM**
+   (0.15 GB/s: its ARMv8 backend is opt-in behind a `cfg` flag), 35× slower than ring's 5.3
+   GB/s on the same core. On x86 ring is still 3.5× faster. ring's ChaCha20 is the fallback
+   for a device without AES instructions. (aws-lc-rs may be faster again; one row later.)
+3. **On ARM, BLAKE3 is the write cost**: 67–76% of single-core write time and ~40% of a read
+   (1.4–1.8 GB/s per ARM core vs 5 on x86). It names every shard and backs verification, so it
+   stays; it already runs per shard in parallel. If writes ever need to be cheaper on phones,
+   this is the stage to look at, not the cipher or the code.
+4. **Code in column slices; 256 KiB is the default.** Whole-shard decoding fell out of cache on
+   the laptop (0.58 GB/s at 16 threads vs 1.47 sliced). 256 KiB was best on the Apple, Xeon and
+   Windows runners, 64 KiB on the laptop, whole shards on Neoverse N2 (large caches). Make it
+   a tuned constant, not a format decision: slicing never changes the bytes on disk.
+5. **Degraded reads cost 1.7–3× a healthy read.** `reed-solomon-simd` pays a fixed cost per
+   decode call (its GF(2¹⁶) error-locator transform), which is why small slices hurt. It is
+   acceptable: degraded reads are rare and still exceed 0.5 GB/s per core everywhere. A GF(2⁸)
+   matrix code with the decode matrix cached per loss pattern remains a later optimization,
+   not a blocker.
+6. **Stripe size: 8 MiB stays.** 1–16 MiB are flat on every machine; 32 MiB is slower
+   everywhere. The final choice can rest on network behaviour (S2).
+7. **The code is a fault-tolerance choice, not a speed one.** 3-of-5 through 10-of-14 are within
+   noise of each other on writes and healthy reads.
+8. **FastCDC runs at 1.9–2.6 GB/s per core** on CI machines (1.2 on the throttled laptop),
+   at every average chunk size tried (256 KiB – 4 MiB). Chunking is never the bottleneck.
+
+## Decisions
+
+- Cipher: ring AES-256-GCM; ring ChaCha20-Poly1305 only where AES instructions are missing.
+  Never RustCrypto `aes-gcm` on ARM.
+- Stripes: 8 MiB, 4-of-6, coded and decoded in 256 KiB column slices (tunable).
+- Shard ids: BLAKE3, kept despite being the main ARM cost.
+- Reed–Solomon: `reed-solomon-simd` for now; revisit with a cached-matrix GF(2⁸) code if
+  degraded reads matter in practice.

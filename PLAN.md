@@ -142,7 +142,7 @@ the unit you want for **storage** (coding, placement, big parallel reads).
    identical chunks of two *different* accounts look unrelated. Each key encrypts exactly one
    plaintext, so the AES-GCM nonce can be fixed. The manifest lists each chunk's key, so
    sharing a file means sharing its (wrapped) manifest and nothing else.
-3. **Pack chunks into stripes** of a fixed size (start at 8–32 MiB; S1 picks it). A 3 KB text
+3. **Pack chunks into stripes** of a fixed size (8 MiB, from S1). A 3 KB text
    file shares a stripe with other chunks instead of costing six shards and six round trips.
    Big files fill stripes of their own.
 4. **Erasure-code each stripe** into `n` shards, any `k` of which rebuild it (Reed–Solomon,
@@ -333,13 +333,12 @@ suite runs against each, and the app does not change between them.
 | S4 | PQ transport | Can iroh's rustls config take `X25519MLKEM768`? Patch size if not |
 | S5 | iOS photo upload | How much a `BGProcessingTask` + background `URLSession` upload can move per night, and whether it must go over HTTP to the home node |
 
-**S1 status (2026-11-23):** bench in `spikes/s1-codec`; first numbers from the laptop on
-battery, CI and phone runs pending. So far: the CPU is far faster than any home uplink on a
-desktop (4-of-6 writes at 0.5 GB/s per core, healthy reads 0.7, degraded 0.23); use ring's
-AES-256-GCM; Reed–Solomon must work in 64 KiB column slices; `reed-solomon-simd` pays a fixed
-cost per decode call, so a GF(2⁸) matrix code with a cached decode matrix is worth trying for
-degraded reads; stripe size (1–16 MiB) and the choice of code barely change CPU cost. Details:
-`spikes/s1-codec/README.md`.
+**S1 done (2026-11-23), except a real-phone run.** `spikes/s1-codec`, results on Apple
+silicon, Linux arm64/x86-64, Windows and the laptop. The CPU is never the bottleneck: one Apple
+M2 core writes 4-of-6 at ~1 GB/s and reads at 1.4 GB/s, against home uplinks of 0.02–1 Gbit/s.
+Decided: ring AES-256-GCM (RustCrypto's runs in software on ARM, 35× slower); 8 MiB stripes,
+4-of-6, coded in 256 KiB column slices; BLAKE3 shard ids, which are the largest cost on ARM.
+Details and tables: `spikes/s1-codec/README.md`.
 
 S0, S3 and S5 shape Phase 1. S1 and S2 are not built on until Phase 3, but they run first
 anyway: parallel coded reads over iroh being fast is Ursa's reason to exist, and if the
