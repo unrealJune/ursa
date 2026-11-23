@@ -1,0 +1,6 @@
+# Hardware crypto on every ARM build. RustCrypto's AES and POLYVAL backends for ARMv8 are
+# opt-in behind these cfg flags and otherwise fall back to SOFTWARE: S1 measured AES-256-GCM at
+# 0.15 GB/s per core on Apple silicon without them. ring and BLAKE3 detect the CPU at run time
+# and need nothing. These are ignored if RUSTFLAGS is set in the environment.
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]
