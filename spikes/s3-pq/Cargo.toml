@@ -19,7 +19,6 @@ getrandom = "0.3"
 hkdf = "0.12"
 sha2 = "0.10"
 sha3 = "0.10"
-x25519-dalek = { version = "3", features = ["static_secrets"] }
 
 x-wing = { version = "0.1.1", optional = true, features = ["getrandom"] }
 ml-dsa = { version = "0.1.2", optional = true }
