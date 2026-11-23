@@ -65,6 +65,10 @@ enum Cmd {
         /// No relays: direct addresses only (an isolated test network).
         #[arg(long)]
         local: bool,
+        /// Use these relays instead of n0's public ones (repeatable). The auth token, if the
+        /// relays need one, is read from S2_RELAY_TOKEN so it never appears in a command line.
+        #[arg(long = "relay")]
+        relays: Vec<String>,
     },
     /// Read stripes from the nodes under each strategy and report goodput.
     Fetch {
@@ -104,6 +108,10 @@ enum Cmd {
         /// No relays: direct addresses only (an isolated test network).
         #[arg(long)]
         local: bool,
+        /// Use these relays instead of n0's public ones (repeatable). The auth token, if the
+        /// relays need one, is read from S2_RELAY_TOKEN so it never appears in a command line.
+        #[arg(long = "relay")]
+        relays: Vec<String>,
         /// Run `--fault` (a shell command) this many seconds into each striped scenario.
         #[arg(long, requires = "fault")]
         fault_at: Option<u64>,
@@ -128,7 +136,9 @@ fn node_secret(seed: &str, index: usize) -> SecretKey {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Serve { seed, index, max_seconds, ticket_out, local } => serve(seed, index, max_seconds, ticket_out, local).await,
+        Cmd::Serve { seed, index, max_seconds, ticket_out, local, relays } => {
+            serve(seed, index, max_seconds, ticket_out, Net { local, relays }).await
+        }
         Cmd::Fetch {
             seed,
             nodes,
@@ -144,6 +154,7 @@ async fn main() -> Result<()> {
             json,
             label,
             local,
+            relays,
             fault_at,
             fault,
         } => {
@@ -154,7 +165,7 @@ async fn main() -> Result<()> {
                 (0..nodes).map(|i| EndpointAddr::new(node_secret(&seed, i).public())).collect()
             };
             let params = Params { k, stripe: stripe_mib * MIB, seconds, window, per_node };
-            fetch(addrs, params, strategies, connect_seconds, shutdown, json, label, local, fault_at.zip(fault)).await
+            fetch(addrs, params, strategies, connect_seconds, shutdown, json, label, Net { local, relays }, fault_at.zip(fault)).await
         }
     }
 }
@@ -217,20 +228,37 @@ impl ProtocolHandler for Server {
     }
 }
 
-async fn bind(secret: SecretKey, local: bool) -> Result<Endpoint> {
+/// How an endpoint reaches the world: no relays, our own relays, or n0's public ones.
+struct Net {
+    local: bool,
+    relays: Vec<String>,
+}
+
+async fn bind(secret: SecretKey, net: &Net) -> Result<Endpoint> {
     let mut b = Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
-    if local {
+    if net.local {
         b = b.relay_mode(iroh::RelayMode::Disabled);
+    } else if !net.relays.is_empty() {
+        let urls = net
+            .relays
+            .iter()
+            .map(|u| u.parse::<iroh::RelayUrl>().map_err(|e| anyhow!("bad relay URL {u}: {e}")))
+            .collect::<Result<Vec<_>>>()?;
+        let mut map = iroh::RelayMap::from_iter(urls);
+        if let Ok(token) = std::env::var("S2_RELAY_TOKEN") {
+            map = map.with_auth_token(token.trim().to_owned());
+        }
+        b = b.relay_mode(iroh::RelayMode::Custom(map));
     }
     let endpoint = b.bind().await?;
-    if !local {
+    if !net.local {
         let _ = tokio::time::timeout(Duration::from_secs(30), endpoint.online()).await;
     }
     Ok(endpoint)
 }
 
-async fn serve(seed: String, index: usize, max_seconds: u64, ticket_out: Option<PathBuf>, local: bool) -> Result<()> {
-    let endpoint = bind(node_secret(&seed, index), local).await?;
+async fn serve(seed: String, index: usize, max_seconds: u64, ticket_out: Option<PathBuf>, net: Net) -> Result<()> {
+    let endpoint = bind(node_secret(&seed, index), &net).await?;
     let mut data = vec![0u8; SERVE_BUF];
     blake3::Hasher::new().update(seed.as_bytes()).finalize_xof().fill(&mut data);
     let shutdown = Arc::new(Notify::new());
@@ -574,7 +602,7 @@ async fn fetch(
     shutdown: bool,
     json: Option<PathBuf>,
     label: String,
-    local: bool,
+    net: Net,
     fault: Option<(u64, String)>,
 ) -> Result<()> {
     let n = addrs.len();
@@ -582,7 +610,7 @@ async fn fetch(
         bail!("need 0 < k <= nodes <= 64");
     }
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let endpoint = bind(SecretKey::from_bytes(&blake3::derive_key("ursa s2 client key", &nanos.to_le_bytes())), local).await?;
+    let endpoint = bind(SecretKey::from_bytes(&blake3::derive_key("ursa s2 client key", &nanos.to_le_bytes())), &net).await?;
 
     // Nodes that cannot be reached are left out, as a real read would leave them out.
     let until = Instant::now() + Duration::from_secs(connect_seconds);
