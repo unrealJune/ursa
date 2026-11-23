@@ -3,9 +3,11 @@ name: S1 codec bench
 on:
   workflow_dispatch:
   push:
+    # Code only: committing results must not re-run the bench.
     paths:
-      - spikes/s1-codec/**
-      - .github/workflows/s1-codec.yml
+      - spikes/s1-codec/src/**
+      - spikes/s1-codec/Cargo.*
+      - .cargo/**
 
 permissions:
   contents: read
