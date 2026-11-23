@@ -321,13 +321,25 @@ async fn send_op(conn: &Connection, op: u8) -> Result<()> {
     Ok(())
 }
 
+/// The selected path, described without the address: results get committed, and a direct path's
+/// address is someone's home IP. A relay is named by its URL (ours, not personal).
 fn path_of(conn: &Connection) -> String {
     let paths = conn.paths();
     let selected = paths.iter().find(|p| p.is_selected());
     match selected {
-        Some(p) if p.is_ip() => format!("direct {:?}", p.remote_addr()),
-        Some(p) if p.is_relay() => format!("relay {:?}", p.remote_addr()),
-        Some(p) => format!("other {:?}", p.remote_addr()),
+        Some(p) => match p.remote_addr() {
+            iroh::TransportAddr::Ip(sa) => {
+                let scope = match sa.ip() {
+                    std::net::IpAddr::V4(v4) if v4.is_private() || v4.is_loopback() || v4.is_link_local() => "private",
+                    std::net::IpAddr::V6(v6) if v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80 => "private",
+                    _ => "public",
+                };
+                let family = if sa.is_ipv4() { "IPv4" } else { "IPv6" };
+                format!("direct, {scope} {family}")
+            }
+            iroh::TransportAddr::Relay(url) => format!("relay {url}"),
+            _ => "other".into(),
+        },
         None => "none".into(),
     }
 }
