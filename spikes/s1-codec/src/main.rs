@@ -34,15 +34,21 @@ enum CipherKind {
     RustCryptoAes256Gcm,
     RingChaCha20Poly1305,
     RustCryptoXChaCha20Poly1305,
+    #[cfg(feature = "aws-lc")]
+    AwsLcAes256Gcm,
 }
 
 impl CipherKind {
-    const ALL: [CipherKind; 4] = [
-        CipherKind::RingAes256Gcm,
-        CipherKind::RustCryptoAes256Gcm,
-        CipherKind::RingChaCha20Poly1305,
-        CipherKind::RustCryptoXChaCha20Poly1305,
-    ];
+    fn all() -> Vec<CipherKind> {
+        vec![
+            CipherKind::RingAes256Gcm,
+            #[cfg(feature = "aws-lc")]
+            CipherKind::AwsLcAes256Gcm,
+            CipherKind::RustCryptoAes256Gcm,
+            CipherKind::RingChaCha20Poly1305,
+            CipherKind::RustCryptoXChaCha20Poly1305,
+        ]
+    }
 
     fn label(self) -> &'static str {
         match self {
@@ -50,12 +56,16 @@ impl CipherKind {
             CipherKind::RustCryptoAes256Gcm => "AES-256-GCM (RustCrypto)",
             CipherKind::RingChaCha20Poly1305 => "ChaCha20-Poly1305 (ring)",
             CipherKind::RustCryptoXChaCha20Poly1305 => "XChaCha20-Poly1305 (RustCrypto)",
+            #[cfg(feature = "aws-lc")]
+            CipherKind::AwsLcAes256Gcm => "AES-256-GCM (aws-lc-rs)",
         }
     }
 }
 
 enum Cipher {
     Ring(ring::aead::LessSafeKey),
+    #[cfg(feature = "aws-lc")]
+    AwsLc(aws_lc_rs::aead::LessSafeKey),
     Aes(Box<aes_gcm::Aes256Gcm>),
     XChaCha(Box<chacha20poly1305::XChaCha20Poly1305>),
 }
@@ -74,6 +84,10 @@ impl Cipher {
             CipherKind::RustCryptoAes256Gcm => {
                 Cipher::Aes(Box::new(aes_gcm::Aes256Gcm::new_from_slice(&key).unwrap()))
             }
+            #[cfg(feature = "aws-lc")]
+            CipherKind::AwsLcAes256Gcm => Cipher::AwsLc(aws_lc_rs::aead::LessSafeKey::new(
+                aws_lc_rs::aead::UnboundKey::new(&aws_lc_rs::aead::AES_256_GCM, &key).unwrap(),
+            )),
             CipherKind::RustCryptoXChaCha20Poly1305 => Cipher::XChaCha(Box::new(
                 chacha20poly1305::XChaCha20Poly1305::new_from_slice(&key).unwrap(),
             )),
@@ -96,6 +110,14 @@ impl Cipher {
     fn seal(&self, index: u64, buf: &mut Vec<u8>) {
         use aes_gcm::aead::AeadInPlace;
         match self {
+            #[cfg(feature = "aws-lc")]
+            Cipher::AwsLc(key) => key
+                .seal_in_place_append_tag(
+                    aws_lc_rs::aead::Nonce::assume_unique_for_key(Self::nonce12(index)),
+                    aws_lc_rs::aead::Aad::empty(),
+                    buf,
+                )
+                .unwrap(),
             Cipher::Ring(key) => key
                 .seal_in_place_append_tag(
                     ring::aead::Nonce::assume_unique_for_key(Self::nonce12(index)),
@@ -120,6 +142,18 @@ impl Cipher {
     fn open(&self, index: u64, buf: &mut Vec<u8>) {
         use aes_gcm::aead::AeadInPlace;
         match self {
+            #[cfg(feature = "aws-lc")]
+            Cipher::AwsLc(key) => {
+                let len = key
+                    .open_in_place(
+                        aws_lc_rs::aead::Nonce::assume_unique_for_key(Self::nonce12(index)),
+                        aws_lc_rs::aead::Aad::empty(),
+                        buf,
+                    )
+                    .expect("tag")
+                    .len();
+                buf.truncate(len);
+            }
             Cipher::Ring(key) => {
                 let len = key
                     .open_in_place(
@@ -667,6 +701,12 @@ fn cpu_name() -> String {
 
 fn crypto_features() -> String {
     let mut f = Vec::new();
+    if cfg!(aes_armv8) {
+        f.push("cfg:aes_armv8");
+    }
+    if cfg!(polyval_armv8) {
+        f.push("cfg:polyval_armv8");
+    }
     #[cfg(target_arch = "x86_64")]
     {
         for (n, on) in [
@@ -730,7 +770,7 @@ fn main() {
 
     // 1. Ciphers
     let _ = writeln!(out, "\n## Ciphers (8 MiB pieces)\n\n| Cipher | seal 1T | open 1T | seal {cores}T | open {cores}T |\n| --- | ---: | ---: | ---: | ---: |");
-    for kind in CipherKind::ALL {
+    for kind in CipherKind::all() {
         let s1 = cipher_only(&mut b, kind, 8 * MIB, 1, total, false);
         let o1 = cipher_only(&mut b, kind, 8 * MIB, 1, total, true);
         let sn = cipher_only(&mut b, kind, 8 * MIB, cores, total, false);

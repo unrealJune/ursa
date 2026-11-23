@@ -17,11 +17,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, label: linux-x86_64 }
-          - { os: ubuntu-24.04-arm, label: linux-arm64 }
+          - { os: ubuntu-24.04, label: linux-x86_64, features: aws-lc }
+          - { os: ubuntu-24.04-arm, label: linux-arm64, features: aws-lc }
           # Apple silicon: the closest CI gets to an iPhone's cores.
-          - { os: macos-15, label: macos-arm64 }
-          - { os: windows-2025, label: windows-x86_64 }
+          - { os: macos-15, label: macos-arm64, features: aws-lc }
+          - { os: windows-2025, label: windows-x86_64, features: "" }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal && rustup default stable
-      - run: cargo build --release --locked || cargo build --release
+      - run: cargo build --release --features "${{ matrix.features }}"
       - run: ./target/release/s1-codec --json "s1-${{ matrix.label }}.json" | tee "s1-${{ matrix.label }}.md"
       - run: cat "s1-${{ matrix.label }}.md" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
