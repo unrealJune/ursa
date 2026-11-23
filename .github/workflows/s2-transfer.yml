@@ -25,6 +25,7 @@ on:
     paths:
       - spikes/s2-transfer/src/**
       - spikes/s2-transfer/Cargo.*
+      - spikes/s2-transfer/netns.sh
 
 permissions:
   contents: read
@@ -78,36 +79,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: spikes/s2-transfer/netns.sh
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           name: s2-bin
       - name: network
-        run: |
-          set -x
-          sudo modprobe br_netfilter || true
-          sudo sysctl -w net.bridge.bridge-nf-call-iptables=0 net.bridge.bridge-nf-call-ip6tables=0 || true
-          sudo ip link add br0 type bridge
-          sudo ip link set br0 up
-          sudo iptables -I FORWARD -i br0 -o br0 -j ACCEPT
-          ns() { # name address [upload-mbit one-way-delay-ms]
-            sudo ip netns add "$1"
-            sudo ip link add "v-$1" type veth peer name eth0 netns "$1"
-            sudo ip link set "v-$1" master br0 up
-            sudo ip -n "$1" addr add "$2/24" dev eth0
-            sudo ip -n "$1" link set eth0 up
-            sudo ip -n "$1" link set lo up
-            if [ -n "${3:-}" ]; then
-              sudo ip netns exec "$1" tc qdisc add dev eth0 root netem delay "$4ms" rate "$3mbit" limit 100000
-            fi
-          }
-          ns client 10.77.0.10
-          ns n0 10.77.0.20 100 15
-          ns n1 10.77.0.21 50 30
-          ns n2 10.77.0.22 40 25
-          ns n3 10.77.0.23 20 50
-          ns n4 10.77.0.24 200 10
-          ns n5 10.77.0.25 8 90
-          sudo ip netns exec client ping -c 2 10.77.0.25
+        run: sudo bash spikes/s2-transfer/netns.sh up
       - name: run
         run: |
           chmod +x s2
@@ -129,3 +109,47 @@ jobs:
         with:
           name: s2-shaped
           path: s2-shaped*
+
+  # The same shaped network, with the fastest node (n4, 200 Mbit/s) failing four ways.
+  faults:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: spikes/s2-transfer/netns.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: s2-bin
+      - name: network
+        run: sudo bash spikes/s2-transfer/netns.sh up
+      - name: run
+        run: |
+          chmod +x s2
+          NS=spikes/s2-transfer/netns.sh
+          start() { sudo ip netns exec "n$1" ./s2 serve --local --seed faults --index "$1" --max-seconds 2400 --ticket-out "t$1.txt" > "serve$1.log" 2>&1 & }
+          wait_ticket() { for _ in $(seq 60); do [ -s "t$1.txt" ] && break; sleep 1; done; }
+          peers() { p=""; for i in 0 1 2 3 4 5; do p="$p --peer $(cat t$i.txt)"; done; echo "$p"; }
+          run() {
+            name=$1; shift
+            # shellcheck disable=SC2046
+            sudo ip netns exec client ./s2 fetch --local $(peers) --seconds 60 --strategies race,pull --connect-seconds 15               --label "fastest node $name; uploads 100/50/40/20/200/8 Mbit/s" --json "s2-fault-$name.json" "$@" | tee "s2-fault-$name.md"
+          }
+          for i in 0 1 2 3 4 5; do start "$i"; done
+          for i in 0 1 2 3 4 5; do wait_ticket "$i"; done
+          run healthy
+          run killed-at-20s --fault-at 20 --fault "pkill -f -- '--index 4 '"
+          run offline
+          rm -f t4.txt; start 4; wait_ticket 4
+          run blackholed-at-20s --fault-at 20 --fault "ip netns exec n4 tc qdisc change dev eth0 root netem loss 100%"
+          sudo bash "$NS" restore 4
+          run slowed-to-2mbit-at-20s --fault-at 20 --fault "ip netns exec n4 tc qdisc change dev eth0 root netem delay 10ms rate 2mbit limit 100000"
+          sudo bash "$NS" restore 4
+          cat s2-fault-*.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s2-faults
+          path: s2-fault-*
