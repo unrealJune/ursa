@@ -1,10 +1,16 @@
 name: S2 transfer
 
-# Six storage nodes and one client, each on its own GitHub runner, talking over iroh exactly as
-# real nodes would (discovery, relays, hole punching). Each node's UPLOAD is throttled with netem
-# to look like a home connection, including one straggler, because a home uplink is what limits
-# a read from friends' nodes. The client's link is left alone (fast home downlink).
-# A loopback job runs the same thing on one machine as the no-network ceiling.
+# A client and six storage nodes talking over iroh. Two setups:
+#
+# - loopback: everything on one machine, no shaping. The no-network ceiling.
+# - shaped:   seven Linux network namespaces on one runner, joined by a bridge. Each node's
+#             UPLOAD is throttled with netem to look like a home connection, one of them a
+#             straggler, because a home uplink is what limits a read from friends' nodes. The
+#             client's link is left alone (a fast home downlink). Paths are direct; relays off.
+#
+# Nodes on separate GitHub runners were tried first (run 45254098074): Azure's NAT defeated hole
+# punching, every path fell back to n0's public relays, and they carried ~nothing. Relay
+# throughput and real NAT traversal are measured on our own nodes instead.
 
 on:
   workflow_dispatch:
@@ -24,7 +30,6 @@ permissions:
   contents: read
 
 env:
-  SEED: s2-${{ github.run_id }}-${{ github.run_attempt }}
   SECONDS_PER: ${{ inputs.seconds || '30' }}
   EXTRA: ${{ inputs.extra }}
 
@@ -57,10 +62,10 @@ jobs:
       - name: run
         run: |
           chmod +x s2
-          for i in 0 1 2 3 4 5; do ./s2 serve --seed "$SEED-lo" --index $i --max-seconds 900 --ticket-out t$i.txt > serve$i.log 2>&1 & done
+          for i in 0 1 2 3 4 5; do ./s2 serve --local --seed lo --index $i --max-seconds 900 --ticket-out t$i.txt > serve$i.log 2>&1 & done
           for i in 0 1 2 3 4 5; do for _ in $(seq 60); do [ -s t$i.txt ] && break; sleep 1; done; done
           peers=""; for i in 0 1 2 3 4 5; do peers="$peers --peer $(cat t$i.txt)"; done
-          ./s2 fetch $peers --seconds "$SECONDS_PER" --shutdown --label "loopback, one runner, no shaping" --json s2-loopback.json $EXTRA | tee s2-loopback.md
+          ./s2 fetch --local $peers --seconds "$SECONDS_PER" --shutdown --label "loopback, one runner, no shaping" --json s2-loopback.json $EXTRA | tee s2-loopback.md
           cat s2-loopback.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -68,37 +73,7 @@ jobs:
           name: s2-loopback
           path: s2-loopback.*
 
-  node:
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Upload rate and one-way delay added to the node's egress: a spread of home uplinks.
-          - { index: 0, rate: 100, delay: 15 }
-          - { index: 1, rate: 50, delay: 30 }
-          - { index: 2, rate: 40, delay: 25 }
-          - { index: 3, rate: 20, delay: 50 }
-          - { index: 4, rate: 200, delay: 10 }
-          - { index: 5, rate: 8, delay: 90 }
-    name: node ${{ matrix.index }} (${{ matrix.rate }} Mbit/s up, +${{ matrix.delay }} ms)
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: s2-bin
-      - name: throttle upload
-        run: |
-          IF=$(ip route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
-          sudo tc qdisc add dev "$IF" root netem delay ${{ matrix.delay }}ms rate ${{ matrix.rate }}mbit limit 100000
-          tc qdisc show dev "$IF"
-      - name: serve
-        run: |
-          chmod +x s2
-          ./s2 serve --seed "$SEED" --index ${{ matrix.index }} --max-seconds 1500
-
-  client:
+  shaped:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -106,15 +81,51 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: s2-bin
-      - name: fetch
+      - name: network
+        run: |
+          set -x
+          sudo modprobe br_netfilter || true
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=0 net.bridge.bridge-nf-call-ip6tables=0 || true
+          sudo ip link add br0 type bridge
+          sudo ip link set br0 up
+          sudo iptables -I FORWARD -i br0 -o br0 -j ACCEPT
+          ns() { # name address [upload-mbit one-way-delay-ms]
+            sudo ip netns add "$1"
+            sudo ip link add "v-$1" type veth peer name eth0 netns "$1"
+            sudo ip link set "v-$1" master br0 up
+            sudo ip -n "$1" addr add "$2/24" dev eth0
+            sudo ip -n "$1" link set eth0 up
+            sudo ip -n "$1" link set lo up
+            if [ -n "${3:-}" ]; then
+              sudo ip netns exec "$1" tc qdisc add dev eth0 root netem delay "$4ms" rate "$3mbit" limit 100000
+            fi
+          }
+          ns client 10.77.0.10
+          ns n0 10.77.0.20 100 15
+          ns n1 10.77.0.21 50 30
+          ns n2 10.77.0.22 40 25
+          ns n3 10.77.0.23 20 50
+          ns n4 10.77.0.24 200 10
+          ns n5 10.77.0.25 8 90
+          sudo ip netns exec client ping -c 2 10.77.0.25
+      - name: run
         run: |
           chmod +x s2
-          ./s2 fetch --seed "$SEED" --nodes 6 --seconds "$SECONDS_PER" --connect-seconds 600 --shutdown \
-            --label "6 GitHub runners, uploads throttled to 100/50/40/20/200/8 Mbit/s" \
-            --json s2-wan.json $EXTRA | tee s2-wan.md
-          cat s2-wan.md >> "$GITHUB_STEP_SUMMARY"
+          for i in 0 1 2 3 4 5; do sudo ip netns exec n$i ./s2 serve --local --seed shaped --index $i --max-seconds 1500 --ticket-out t$i.txt > serve$i.log 2>&1 & done
+          for i in 0 1 2 3 4 5; do for _ in $(seq 60); do [ -s t$i.txt ] && break; sleep 1; done; done
+          peers=""; for i in 0 1 2 3 4 5; do peers="$peers --peer $(cat t$i.txt)"; done
+          label="uploads throttled to 100/50/40/20/200/8 Mbit/s, +15/30/25/50/10/90 ms"
+          sudo ip netns exec client ./s2 fetch --local $peers --seconds "$SECONDS_PER" \
+            --label "$label" --json s2-shaped.json $EXTRA | tee s2-shaped.md
+          sudo ip netns exec client ./s2 fetch --local $peers --seconds "$SECONDS_PER" --strategies race,pull --per-node 4 \
+            --label "$label; 4 requests in flight per node" --json s2-shaped-pn4.json $EXTRA | tee s2-shaped-pn4.md
+          sudo ip netns exec client ./s2 fetch --local $peers --seconds "$SECONDS_PER" --strategies pull --window 4 --shutdown \
+            --label "$label; window of 4 stripes (32 MiB, a phone's budget)" --json s2-shaped-w4.json $EXTRA | tee s2-shaped-w4.md
+          cat s2-shaped.md s2-shaped-pn4.md s2-shaped-w4.md >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        run: tail -n 5 serve*.log || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: s2-wan
-          path: s2-wan.*
+          name: s2-shaped
+          path: s2-shaped*
