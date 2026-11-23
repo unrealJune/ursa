@@ -305,9 +305,14 @@ nodes*). A phone that just takes photos should never need more than that line.
   one fat uplink among thin ones is capped at a quarter (S2: 197 Mbit/s striped vs 188 from the
   fastest host alone). Your own home node is usually that fat, close host, so it also keeps
   **whole copies of what you open often** (a hot cache), and reads go to it first.
-- **Relays are a fallback, not a path.** n0's public relays moved almost nothing in S2, and
-  GitHub's VMs could not hole-punch each other. Ursa runs its own relays (as Street Cryptid
-  does), and the real numbers come from our own nodes.
+- **Our own relays, always; direct paths are the norm.** From the open internet, iroh punched
+  through two NATs (Kubernetes and the home router) to five nodes on Buttercup and read at
+  841 Mbit/s, 2.4x the best single node. With n0's public relays the same setup got no direct
+  path and ~0.3 Mbit/s, so they must never be the default. Ursa ships with its own relays.
+- **The home node must be directly reachable on its own LAN.** In a Kubernetes pod it was
+  not: a laptop on the same network went out to the relay and back (114-201 Mbit/s). The home
+  node runs on the host network (or advertises a published UDP port) and is found on the LAN
+  by local discovery, because it is the cache every nearby device reads first.
 - **Uploads** are bounded by *your* uplink and cost `n/k` × the file size. Two mitigations:
   1. **Upload via your own node.** A phone sends the encrypted segments to your home node over
      LAN (or once, over the internet), and the home node does the coding and fan-out. It holds
@@ -444,8 +449,10 @@ speeds. Against six throttled uplinks (100/50/40/20/200/8 Mbit/s), the pull sche
 Losing the fastest node mid-read: no stall; goodput drops to the
 remaining nodes' ceiling within 5 s (94-121 Mbit/s against 112), whether it crashed, went silent
 or slowed to a trickle. Decided: pull scheduling with rate-based hedging, at least 8 stripes in
-flight, a hot cache on the home node, our own relays. Still owed: the same run between our own nodes over the internet (NAT
-traversal and relay speed are untested). Details: `spikes/s2-transfer/README.md`.
+flight, a hot cache on the home node, our own relays. Real nodes (five pods on Buttercup): an internet client got direct paths
+through two NATs and read at 841 Mbit/s; n0's public relays broke both the data path and hole
+punching; on the home LAN the pods were only reachable through our relay. Still owed: nodes in
+several homes. Details: `spikes/s2-transfer/README.md`.
 
 S0, S3 and S5 shape Phase 1. S1 and S2 are not built on until Phase 3, but they run first
 anyway: parallel coded reads over iroh being fast is Ursa's reason to exist, and if the

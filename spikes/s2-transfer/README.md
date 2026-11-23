@@ -111,8 +111,45 @@ What it shows:
 4. **So the defences are breadth and the home node.** With twelve similar nodes, losing one
    costs a twelfth. The home node's hot cache keeps the most-read files off the pool entirely.
 
+## Real nodes: five pods on Buttercup (2026-11-23)
+
+Five `s2 serve` pods on Buttercup, June's three-machine k3s cluster at home (Cilium, so each
+pod is behind the cluster's NAT and then the home router's). Manifest and loader in
+[k8s/](k8s/). Two clients, one at a time. Files: [results/buttercup](results/buttercup/).
+
+| Client | Relays | Paths | Best single node | fixed | race | **pull** |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| GitHub runner, open internet | ours (`iroh-euw`, `iroh-wus`) | **direct, all five** | 349 | 615 | 723 | **841 Mbit/s** |
+| GitHub runner, open internet | n0's public ones | relay, all five | 0 | 0 | 0 | 0 |
+| Laptop on the same home LAN | ours | relay (`iroh-wus`), all five | 179 | 49 | 54 | 114 (188-201 by the end) |
+| Laptop on the same home LAN | n0's public ones | relay, all five | 0 | 0 | 0 | 0 |
+
+1. **From the internet, iroh punched straight through two layers of NAT** (Cilium's and the
+   router's) to every pod, and the striped read ran at **841 Mbit/s, 2.4× the best single
+   pod**, steady across the run (805-872 in every 5 s window). Waste was 2%. That is what
+   friends reading from a well-connected home will see.
+2. **n0's public relays are unusable for this**, and not only as a data path: with them, the
+   same nodes and the same runner never got a direct path at all, and the relay itself carried
+   ~0.3 Mbit/s (a 2 MiB shard never finished in 30 s). Every Ursa build ships with our own
+   relays; n0's must never be the default.
+3. **On the home LAN there was no direct path**, so every byte went up to `iroh-wus` and back
+   down the same connection. The pods advertise pod addresses the laptop cannot reach, and
+   their replies come from the hosts' LAN addresses, which the laptop's firewall treats as
+   unsolicited. The home node is meant to be the fast local cache, so **it must be directly
+   reachable on its own LAN**: run it on the host network (or with a published UDP port that it
+   advertises), and let clients find it on the LAN (iroh's local discovery). Behind the relay
+   it still did 114-201 Mbit/s, so the relay is a usable fallback, not a dead end.
+4. **Single-node speeds through the same uplink varied 125-349 Mbit/s** between pods on the
+   same three machines; the pull scheduler took 66 Mbit/s from the slow one and ~200 from the
+   others, as designed.
+
+The nodes and the relay token: the token was copied from `trail-stash`'s Secret into
+`ursa-s2/s2-relay` (removed with the namespace) and into the repo's `S2_RELAY_TOKEN` Actions
+secret, which `s2-remote-client.yml` uses.
+
 ## Still owed
 
-- The same `s2 fetch` between our own nodes over the internet: NAT traversal between real home
-  routers, relay fallback speed on our relays, and real uplinks.
+- Nodes in *several* homes (Buttercup is one uplink): friends' machines, per
+  [REAL-RUN.md](REAL-RUN.md). The internet client and our relays are ready for it.
+- The LAN case with a node on the host network, to confirm a direct local path.
 - Longer runs (5 min) so end effects stop hiding the difference from theory.
