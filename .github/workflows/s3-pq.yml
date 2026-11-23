@@ -92,6 +92,10 @@ jobs:
           - { os: ubuntu-24.04, target: wasm32-unknown-unknown, features: "aws-lc" }
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    env:
+      # aws-lc's C is compiled for the SDK's newest iOS unless told otherwise, and then does not
+      # link against Rust's (older) default target. The app sets this anyway.
+      IPHONEOS_DEPLOYMENT_TARGET: "16.0"
     defaults:
       run:
         shell: bash

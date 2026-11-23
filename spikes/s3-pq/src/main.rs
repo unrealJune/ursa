@@ -354,7 +354,9 @@ fn main() {
             }
         }
         // The full wrap: seal a key with one library's KEM, open it with another's.
-        if let (Some(enc), Some(dec)) = (xwings.first(), xwings.last()) {
+        // Open with the last backend that can decapsulate from a seed (aws-lc-rs cannot).
+        let opener = xwings.iter().rev().find(|x| x.decaps(&seed, &x.encaps(pk).0).is_some());
+        if let (Some(enc), Some(dec)) = (xwings.last(), opener) {
             let secret = random::<32>();
             let (ct, ss) = enc.encaps(pk);
             let sealed = seal(&wrap_key(&ss, &ct, pk), &secret, b"album 42");
