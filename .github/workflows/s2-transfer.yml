@@ -1,0 +1,120 @@
+name: S2 transfer
+
+# Six storage nodes and one client, each on its own GitHub runner, talking over iroh exactly as
+# real nodes would (discovery, relays, hole punching). Each node's UPLOAD is throttled with netem
+# to look like a home connection, including one straggler, because a home uplink is what limits
+# a read from friends' nodes. The client's link is left alone (fast home downlink).
+# A loopback job runs the same thing on one machine as the no-network ceiling.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per striped scenario
+        default: "30"
+      extra:
+        description: Extra flags for `s2 fetch`
+        default: ""
+  push:
+    paths:
+      - spikes/s2-transfer/src/**
+      - spikes/s2-transfer/Cargo.*
+
+permissions:
+  contents: read
+
+env:
+  SEED: s2-${{ github.run_id }}-${{ github.run_attempt }}
+  SECONDS_PER: ${{ inputs.seconds || '30' }}
+  EXTRA: ${{ inputs.extra }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: spikes/s2-transfer
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/s2-transfer
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: s2-bin
+          path: spikes/s2-transfer/target/release/s2
+
+  loopback:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: s2-bin
+      - name: run
+        run: |
+          chmod +x s2
+          for i in 0 1 2 3 4 5; do ./s2 serve --seed "$SEED-lo" --index $i --max-seconds 900 --ticket-out t$i.txt > serve$i.log 2>&1 & done
+          for i in 0 1 2 3 4 5; do for _ in $(seq 60); do [ -s t$i.txt ] && break; sleep 1; done; done
+          peers=""; for i in 0 1 2 3 4 5; do peers="$peers --peer $(cat t$i.txt)"; done
+          ./s2 fetch $peers --seconds "$SECONDS_PER" --shutdown --label "loopback, one runner, no shaping" --json s2-loopback.json $EXTRA | tee s2-loopback.md
+          cat s2-loopback.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s2-loopback
+          path: s2-loopback.*
+
+  node:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Upload rate and one-way delay added to the node's egress: a spread of home uplinks.
+          - { index: 0, rate: 100, delay: 15 }
+          - { index: 1, rate: 50, delay: 30 }
+          - { index: 2, rate: 40, delay: 25 }
+          - { index: 3, rate: 20, delay: 50 }
+          - { index: 4, rate: 200, delay: 10 }
+          - { index: 5, rate: 8, delay: 90 }
+    name: node ${{ matrix.index }} (${{ matrix.rate }} Mbit/s up, +${{ matrix.delay }} ms)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: s2-bin
+      - name: throttle upload
+        run: |
+          IF=$(ip route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
+          sudo tc qdisc add dev "$IF" root netem delay ${{ matrix.delay }}ms rate ${{ matrix.rate }}mbit limit 100000
+          tc qdisc show dev "$IF"
+      - name: serve
+        run: |
+          chmod +x s2
+          ./s2 serve --seed "$SEED" --index ${{ matrix.index }} --max-seconds 1500
+
+  client:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: s2-bin
+      - name: fetch
+        run: |
+          chmod +x s2
+          ./s2 fetch --seed "$SEED" --nodes 6 --seconds "$SECONDS_PER" --connect-seconds 600 --shutdown \
+            --label "6 GitHub runners, uploads throttled to 100/50/40/20/200/8 Mbit/s" \
+            --json s2-wan.json $EXTRA | tee s2-wan.md
+          cat s2-wan.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s2-wan
+          path: s2-wan.*

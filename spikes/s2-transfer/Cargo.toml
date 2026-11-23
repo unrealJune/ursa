@@ -1,0 +1,23 @@
+[package]
+name = "s2-transfer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Spike S2: parallel shard reads over iroh from several nodes"
+
+[[bin]]
+name = "s2"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+iroh = "1.4"
+iroh-tickets = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+codegen-units = 4
