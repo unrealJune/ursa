@@ -1,0 +1,89 @@
+# Five S2 nodes on Buttercup, for testing. Applied by hand (`kubectl apply -f`), not through Flux,
+# and removed with `kubectl delete namespace ursa-s2` when the run is over.
+#
+# No image is built: the repo is private, so its packages would need a pull secret. Each pod
+# starts from pinned busybox, waits in its init container until `deploy.sh` copies the static
+# `s2` binary in, then runs it. Restricted pod security throughout (non-root, no capabilities,
+# read-only root), as Buttercup's Kyverno policies require.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ursa-s2
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    app.kubernetes.io/part-of: ursa-spike
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: s2
+  namespace: ursa-s2
+  labels:
+    app.kubernetes.io/name: ursa-s2
+spec:
+  replicas: 5
+  podManagementPolicy: Parallel
+  serviceName: s2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ursa-s2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ursa-s2
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread over the three machines where possible.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: ursa-s2
+      initContainers:
+        - name: wait-for-binary
+          image: busybox:1.37.0
+          command: ["sh", "-c", "until [ -f /opt/s2/ready ]; do sleep 2; done"]
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: bin, mountPath: /opt/s2 }
+      containers:
+        - name: s2
+          image: busybox:1.37.0
+          env:
+            - name: SEED
+              valueFrom:
+                configMapKeyRef: { name: s2, key: seed }
+          # The pod's ordinal (s2-0 … s2-4) is the node index.
+          command: ["sh", "-c", "exec /opt/s2/s2 serve --seed \"$SEED\" --index \"${HOSTNAME##*-}\" --max-seconds 86400"]
+          securityContext: *restricted
+          resources:
+            requests: { cpu: 100m, memory: 160Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: bin, mountPath: /opt/s2 }
+      volumes:
+        - name: bin
+          emptyDir: { sizeLimit: 32Mi }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: s2
+  namespace: ursa-s2
+data:
+  seed: ursa-buttercup-1
