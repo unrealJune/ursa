@@ -104,6 +104,11 @@ enum Cmd {
         /// No relays: direct addresses only (an isolated test network).
         #[arg(long)]
         local: bool,
+        /// Run `--fault` (a shell command) this many seconds into each striped scenario.
+        #[arg(long, requires = "fault")]
+        fault_at: Option<u64>,
+        #[arg(long, requires = "fault_at")]
+        fault: Option<String>,
     },
 }
 
@@ -139,6 +144,8 @@ async fn main() -> Result<()> {
             json,
             label,
             local,
+            fault_at,
+            fault,
         } => {
             let addrs: Vec<EndpointAddr> = if !peers.is_empty() {
                 peers.iter().map(|p| parse_peer(p)).collect::<Result<_>>()?
@@ -147,7 +154,7 @@ async fn main() -> Result<()> {
                 (0..nodes).map(|i| EndpointAddr::new(node_secret(&seed, i).public())).collect()
             };
             let params = Params { k, stripe: stripe_mib * MIB, seconds, window, per_node };
-            fetch(addrs, params, strategies, connect_seconds, shutdown, json, label, local).await
+            fetch(addrs, params, strategies, connect_seconds, shutdown, json, label, local, fault_at.zip(fault)).await
         }
     }
 }
@@ -300,11 +307,10 @@ fn path_of(conn: &Connection) -> String {
 struct StripeState {
     started: Instant,
     done: usize,
-    /// Scenario-node positions with a request outstanding for this stripe.
-    pending: Vec<usize>,
+    /// Scenario-node positions with a request outstanding for this stripe, and when it began.
+    pending: Vec<(usize, Instant)>,
     /// Bitmask of positions ever asked for this stripe.
     asked: u64,
-    extras: usize,
 }
 
 struct Event {
@@ -317,6 +323,7 @@ struct Event {
 struct Report {
     scenario: String,
     strategy: Strategy,
+    /// Original node indices, in position order.
     nodes: Vec<usize>,
     k: usize,
     stripe_mib: usize,
@@ -332,6 +339,11 @@ struct Report {
     stripe_ms_max: f64,
     hedges: u64,
     failures: u64,
+    /// Nodes taken out of rotation after a failed request (original indices).
+    dropped: Vec<usize>,
+    /// Goodput per second of the run.
+    timeline_mbit: Vec<f64>,
+    fault: Option<String>,
 }
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
@@ -341,98 +353,112 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Runs one scenario: `nodes` are indices into `conns`; `k` shards of `shard_len` per stripe.
-async fn run_scenario(
+/// A request is overdue when it has run 2.5x longer than its node's measured rate predicts
+/// (at least 1 s), or, before the node has a rate, 2.5x the median stripe time.
+fn overdue(started: Instant, rate: Option<f64>, shard_len: usize, median_stripe: Option<f64>) -> bool {
+    let expected = match (rate, median_stripe) {
+        (Some(r), _) => shard_len as f64 / r,
+        (None, Some(m)) => m,
+        (None, None) => return false,
+    };
+    started.elapsed().as_secs_f64() > (2.5 * expected).max(1.0)
+}
+
+struct Scenario {
     name: String,
     strategy: Strategy,
-    conns: &[Connection],
+    /// Positions -> indices into the live connection list.
     nodes: Vec<usize>,
     k: usize,
     shard_len: usize,
-    p: Params,
     seconds: u64,
-) -> Report {
+    fault: Option<(u64, String)>,
+}
+
+/// Runs one scenario. Pull scheduling, in order of preference for an idle node: the oldest
+/// stripe that still needs a shard (an overdue request does not count as coming), then a new
+/// stripe if the window allows. A node whose request fails leaves the rotation.
+async fn run_scenario(sc: Scenario, conns: &[(usize, Connection)], p: Params) -> Report {
+    let Scenario { name, strategy, nodes, k, shard_len, seconds, fault } = sc;
     let nn = nodes.len();
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
     let received: Vec<Arc<AtomicU64>> = (0..nn).map(|_| Arc::new(AtomicU64::new(0))).collect();
     let mut inflight: BTreeMap<u64, StripeState> = BTreeMap::new();
     let mut handles: HashMap<(u64, usize), AbortHandle> = HashMap::new();
     let mut busy = vec![0usize; nn];
+    let mut dead = vec![false; nn];
+    let mut rate: Vec<Option<f64>> = vec![None; nn];
     let mut next_stripe = 0u64;
     let mut completed = 0u64;
     let mut latencies: Vec<f64> = Vec::new();
     let mut recent: VecDeque<f64> = VecDeque::new();
+    let mut timeline: Vec<u64> = vec![0; seconds as usize + 1];
     let (mut hedges, mut failures) = (0u64, 0u64);
 
     let start = Instant::now();
     let deadline = start + Duration::from_secs(seconds);
+    if let Some((at, cmd)) = fault.clone() {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(at)).await;
+            eprintln!("fault at {at} s: {cmd}");
+            let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd).status().await;
+        });
+    }
 
     loop {
-        let now = Instant::now();
-        if now >= deadline {
+        if Instant::now() >= deadline {
             break;
         }
-        // Overdue: 1.5 × the median recent stripe time, at least 200 ms.
-        let hedge_after = if recent.len() >= 4 {
+        let median = if recent.len() >= 4 {
             let mut v: Vec<f64> = recent.iter().copied().collect();
             v.sort_by(f64::total_cmp);
-            Some(Duration::from_secs_f64((pct(&v, 0.5) * 1.5 / 1000.0).max(0.2)))
+            Some(pct(&v, 0.5) / 1000.0)
         } else {
             None
         };
 
-        // Hand out work until no node can take any.
         loop {
             let mut progressed = false;
             for pos in 0..nn {
-                while busy[pos] < p.per_node {
-                    let bit = 1u64 << pos;
-                    // Which shards this position may serve, by strategy.
-                    let eligible = match strategy {
-                        Strategy::Single | Strategy::Race | Strategy::Pull => true,
-                        Strategy::Fixed => pos < k,
-                    };
-                    if !eligible {
+                while busy[pos] < p.per_node && !dead[pos] {
+                    if strategy == Strategy::Fixed && pos >= k {
                         break;
                     }
-                    // 1. The oldest stripe still owed by this node.
+                    let bit = 1u64 << pos;
+                    // 1. The oldest stripe that still needs a shard this node can give.
                     let mut pick = inflight.iter().find_map(|(&s, st)| {
-                        let wants = match strategy {
-                            Strategy::Pull => st.done + st.pending.len() < k,
-                            Strategy::Single | Strategy::Fixed | Strategy::Race => true,
-                        };
-                        (wants && st.asked & bit == 0).then_some((s, false))
+                        if st.asked & bit != 0 {
+                            return None;
+                        }
+                        match strategy {
+                            Strategy::Pull => {
+                                let coming = st
+                                    .pending
+                                    .iter()
+                                    .filter(|(q, t)| !overdue(*t, rate[*q], shard_len, median))
+                                    .count();
+                                let late = st.pending.len() - coming;
+                                (st.done + coming < k).then_some((s, late > 0))
+                            }
+                            Strategy::Single | Strategy::Fixed | Strategy::Race => Some((s, false)),
+                        }
                     });
                     // 2. A new stripe, if the window allows.
                     if pick.is_none() && inflight.len() < p.window {
                         let s = next_stripe;
                         next_stripe += 1;
-                        inflight.insert(s, StripeState { started: Instant::now(), done: 0, pending: Vec::new(), asked: 0, extras: 0 });
+                        inflight.insert(s, StripeState { started: Instant::now(), done: 0, pending: Vec::new(), asked: 0 });
                         pick = Some((s, false));
                     }
-                    // 3. Pull only: duplicate a shard of the overdue oldest stripe.
-                    if pick.is_none() && strategy == Strategy::Pull {
-                        if let Some(after) = hedge_after {
-                            pick = inflight.iter().find_map(|(&s, st)| {
-                                (st.done < k
-                                    && st.asked & bit == 0
-                                    && st.extras < nn - k
-                                    && st.started.elapsed() > after)
-                                    .then_some((s, true))
-                            });
-                        }
-                    }
-                    let Some((stripe, extra)) = pick else { break };
+                    let Some((stripe, hedge)) = pick else { break };
                     let st = inflight.get_mut(&stripe).unwrap();
                     st.asked |= bit;
-                    st.pending.push(pos);
-                    if extra {
-                        st.extras += 1;
+                    st.pending.push((pos, Instant::now()));
+                    if hedge {
                         hedges += 1;
                     }
                     busy[pos] += 1;
-                    let conn = conns[nodes[pos]].clone();
+                    let conn = conns[nodes[pos]].1.clone();
                     let tx = tx.clone();
                     let ctr = received[pos].clone();
                     let h = tokio::spawn(async move {
@@ -458,12 +484,21 @@ async fn run_scenario(
             continue; // already cancelled and accounted for
         }
         busy[ev.pos] -= 1;
-        let Some(st) = inflight.get_mut(&ev.stripe) else { continue };
-        st.pending.retain(|&q| q != ev.pos);
-        if ev.ok {
-            st.done += 1;
-        } else {
+        if !ev.ok {
             failures += 1;
+            if !dead[ev.pos] {
+                eprintln!("{name}: node n{} dropped after a failed request", conns[nodes[ev.pos]].0);
+            }
+            dead[ev.pos] = true;
+        }
+        let Some(st) = inflight.get_mut(&ev.stripe) else { continue };
+        if let Some(i) = st.pending.iter().position(|(q, _)| *q == ev.pos) {
+            let (_, began) = st.pending.remove(i);
+            if ev.ok {
+                st.done += 1;
+                let r = shard_len as f64 / began.elapsed().as_secs_f64().max(1e-3);
+                rate[ev.pos] = Some(rate[ev.pos].map_or(r, |old| 0.7 * old + 0.3 * r));
+            }
         }
         if st.done >= k {
             let st = inflight.remove(&ev.stripe).unwrap();
@@ -474,7 +509,9 @@ async fn run_scenario(
                 recent.pop_front();
             }
             completed += 1;
-            for q in st.pending {
+            let sec = (start.elapsed().as_secs() as usize).min(timeline.len() - 1);
+            timeline[sec] += (k * shard_len) as u64;
+            for (q, _) in st.pending {
                 if let Some(h) = handles.remove(&(ev.stripe, q)) {
                     h.abort();
                     busy[q] -= 1;
@@ -494,7 +531,7 @@ async fn run_scenario(
     Report {
         scenario: name,
         strategy,
-        nodes,
+        nodes: nodes.iter().map(|&i| conns[i].0).collect(),
         k,
         stripe_mib: k * shard_len / MIB,
         seconds: secs,
@@ -509,6 +546,9 @@ async fn run_scenario(
         stripe_ms_max: latencies.last().copied().unwrap_or(0.0),
         hedges,
         failures,
+        dropped: (0..nn).filter(|&i| dead[i]).map(|i| conns[nodes[i]].0).collect(),
+        timeline_mbit: timeline[..seconds as usize].iter().map(|b| *b as f64 * 8.0 / 1e6).collect(),
+        fault: fault.map(|(at, cmd)| format!("at {at} s: {cmd}")),
     }
 }
 
@@ -535,6 +575,7 @@ async fn fetch(
     json: Option<PathBuf>,
     label: String,
     local: bool,
+    fault: Option<(u64, String)>,
 ) -> Result<()> {
     let n = addrs.len();
     if p.k == 0 || p.k > n || n > 64 {
@@ -543,70 +584,105 @@ async fn fetch(
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
     let endpoint = bind(SecretKey::from_bytes(&blake3::derive_key("ursa s2 client key", &nanos.to_le_bytes())), local).await?;
 
+    // Nodes that cannot be reached are left out, as a real read would leave them out.
     let until = Instant::now() + Duration::from_secs(connect_seconds);
     let t = Instant::now();
-    let conns: Vec<Connection> = futures_join(addrs.iter().map(|a| connect(&endpoint, a.clone(), until))).await?;
+    let attempts = join_all(addrs.iter().map(|a| Box::pin(connect(&endpoint, a.clone(), until))).collect()).await;
     let connect_s = t.elapsed().as_secs_f64();
-    eprintln!("connected to {n} nodes in {connect_s:.1} s");
+    let mut conns: Vec<(usize, Connection)> = Vec::new();
+    let mut offline: Vec<usize> = Vec::new();
+    for (i, r) in attempts.into_iter().enumerate() {
+        match r {
+            Ok(c) => conns.push((i, c)),
+            Err(e) => {
+                eprintln!("n{i} offline: {e:#}");
+                offline.push(i);
+            }
+        }
+    }
+    let live = conns.len();
+    eprintln!("connected to {live} of {n} nodes in {connect_s:.1} s");
+    if live < p.k {
+        bail!("only {live} nodes reachable, need {}", p.k);
+    }
 
     // Warm up every path (and give hole punching a chance) before measuring.
     let warm = Arc::new(AtomicU64::new(0));
     for _ in 0..3 {
-        for c in &conns {
+        for (_, c) in &conns {
             let _ = fetch_shard(c, 0, MIB, &warm).await;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    let paths: Vec<String> = conns.iter().map(path_of).collect();
+    let paths: Vec<String> = conns.iter().map(|(_, c)| path_of(c)).collect();
 
     let shard_len = p.stripe / p.k;
     let mut reports = Vec::new();
     for s in &strategies {
         match s {
             Strategy::Single => {
-                for i in 0..n {
-                    let r = run_scenario(format!("single n{i}"), *s, &conns, vec![i], 1, p.stripe, p, (p.seconds / 2).max(5)).await;
+                for pos in 0..live {
+                    let sc = Scenario {
+                        name: format!("single n{}", conns[pos].0),
+                        strategy: *s,
+                        nodes: vec![pos],
+                        k: 1,
+                        shard_len: p.stripe,
+                        seconds: (p.seconds / 2).max(5),
+                        fault: None,
+                    };
+                    let r = run_scenario(sc, &conns, p).await;
                     eprintln!("{}: {:.0} Mbit/s", r.scenario, r.goodput_mbit);
                     reports.push(r);
                 }
             }
             _ => {
-                let name = format!("{s:?} {}-of-{n}", p.k).to_lowercase();
-                let r = run_scenario(name, *s, &conns, (0..n).collect(), p.k, shard_len, p, p.seconds).await;
+                let sc = Scenario {
+                    name: format!("{s:?} {}-of-{live}", p.k).to_lowercase(),
+                    strategy: *s,
+                    nodes: (0..live).collect(),
+                    k: p.k,
+                    shard_len,
+                    seconds: p.seconds,
+                    fault: fault.clone(),
+                };
+                let r = run_scenario(sc, &conns, p).await;
                 eprintln!("{}: {:.0} Mbit/s", r.scenario, r.goodput_mbit);
                 reports.push(r);
             }
         }
     }
-    let paths_after: Vec<String> = conns.iter().map(path_of).collect();
+    let paths_after: Vec<String> = conns.iter().map(|(_, c)| path_of(c)).collect();
 
     // Report
     let mut out = String::new();
     let _ = writeln!(out, "# S2 results{}", if label.is_empty() { String::new() } else { format!(": {label}") });
     let _ = writeln!(
         out,
-        "\n{n} nodes, {}-of-{n}, {} MiB stripes ({} KiB shards), window {} stripes, {} requests in flight per node. Connected in {connect_s:.1} s. Goodput counts completed stripes only; waste is bytes received that no completed stripe used.",
+        "\n{live} of {n} nodes reachable, {}-of-{n} stripes, {} MiB ({} KiB shards), window {} stripes, {} requests in flight per node. Connected in {connect_s:.1} s. Goodput counts completed stripes only; waste is bytes received that no completed stripe used.",
         p.k,
         p.stripe / MIB,
         shard_len / 1024,
         p.window,
         p.per_node
     );
-    let _ = writeln!(out, "\n| Node | path after warm-up | path at end |\n| --- | --- | --- |");
-    for i in 0..n {
-        let _ = writeln!(out, "| n{i} | {} | {} |", paths[i], paths_after[i]);
+    if let Some((at, cmd)) = &fault {
+        let _ = writeln!(out, "\nFault injected {at} s into each striped scenario: `{cmd}`");
     }
-    let _ = writeln!(out, "\n| Scenario | Goodput Mbit/s | Received Mbit/s | Waste | Stripe p50 / p90 / max ms | Hedges | Per node Mbit/s |\n| --- | ---: | ---: | ---: | ---: | ---: | --- |");
+    let _ = writeln!(out, "\n| Node | path after warm-up | path at end |\n| --- | --- | --- |");
+    for (pos, (i, _)) in conns.iter().enumerate() {
+        let _ = writeln!(out, "| n{i} | {} | {} |", paths[pos], paths_after[pos]);
+    }
+    for i in &offline {
+        let _ = writeln!(out, "| n{i} | offline | offline |");
+    }
+    let _ = writeln!(out, "\n| Scenario | Goodput Mbit/s | Received Mbit/s | Waste | Stripe p50 / p90 / max ms | Hedges | Dropped | Per node Mbit/s |\n| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |");
     for r in &reports {
-        let per: Vec<String> = r
-            .nodes
-            .iter()
-            .zip(&r.per_node_mbit)
-            .map(|(i, m)| format!("n{i} {m:.0}"))
-            .collect();
+        let per: Vec<String> = r.nodes.iter().zip(&r.per_node_mbit).map(|(i, m)| format!("n{i} {m:.0}")).collect();
+        let dropped: Vec<String> = r.dropped.iter().map(|i| format!("n{i}")).collect();
         let _ = writeln!(
             out,
-            "| {} | {:.0} | {:.0} | {:.0}% | {:.0} / {:.0} / {:.0} | {} | {} |",
+            "| {} | {:.0} | {:.0} | {:.0}% | {:.0} / {:.0} / {:.0} | {} | {} | {} |",
             r.scenario,
             r.goodput_mbit,
             r.received_mbit,
@@ -615,39 +691,44 @@ async fn fetch(
             r.stripe_ms_p90,
             r.stripe_ms_max,
             r.hedges,
+            if dropped.is_empty() { "-".into() } else { dropped.join(" ") },
             per.join(" · ")
         );
     }
+    // Goodput over time, in 5 s buckets, for the striped scenarios.
+    let striped: Vec<&Report> = reports.iter().filter(|r| r.strategy != Strategy::Single).collect();
+    if let Some(first) = striped.first() {
+        let buckets = first.timeline_mbit.len().div_ceil(5);
+        let _ = write!(out, "\nGoodput Mbit/s by 5 s window:\n\n| Scenario |");
+        for b in 0..buckets {
+            let _ = write!(out, " {}-{} s |", b * 5, (b + 1) * 5);
+        }
+        let _ = write!(out, "\n| --- |");
+        for _ in 0..buckets {
+            let _ = write!(out, " ---: |");
+        }
+        let _ = writeln!(out);
+        for r in &striped {
+            let _ = write!(out, "| {} |", r.scenario);
+            for chunk in r.timeline_mbit.chunks(5) {
+                let _ = write!(out, " {:.0} |", chunk.iter().sum::<f64>() / chunk.len() as f64);
+            }
+            let _ = writeln!(out);
+        }
+    }
     println!("{out}");
     if let Some(path) = json {
-        let doc = serde_json::json!({ "label": label, "params": p, "connect_s": connect_s, "paths": paths, "paths_after": paths_after, "reports": reports });
+        let doc = serde_json::json!({ "label": label, "params": p, "connect_s": connect_s, "offline": offline, "paths": paths, "paths_after": paths_after, "reports": reports });
         std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
     }
 
     if shutdown {
-        for c in &conns {
-            let _ = send_op(c, OP_SHUTDOWN).await;
+        for (_, c) in &conns {
+            let _ = tokio::time::timeout(Duration::from_secs(5), send_op(c, OP_SHUTDOWN)).await;
         }
     }
     endpoint.close().await;
     Ok(())
-}
-
-/// Joins futures concurrently, in order, failing on the first error.
-async fn futures_join<F, T>(futs: impl Iterator<Item = F>) -> Result<Vec<T>>
-where
-    F: std::future::Future<Output = Result<T>>,
-{
-    let mut set = Vec::new();
-    for f in futs {
-        set.push(Box::pin(f));
-    }
-    let mut out = Vec::with_capacity(set.len());
-    let results = join_all(set).await;
-    for r in results {
-        out.push(r?);
-    }
-    Ok(out)
 }
 
 async fn join_all<F: std::future::Future + Unpin>(mut futs: Vec<F>) -> Vec<F::Output> {

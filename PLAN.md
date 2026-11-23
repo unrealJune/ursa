@@ -155,10 +155,11 @@ the unit you want for **storage** (coding, placement, big parallel reads).
    stripe table on the home node, not in each file manifest, so repair moves a shard without
    touching any manifest.
 
-Default `k`/`n`: **4-of-6** (decided): 1.5× storage overhead (vs 3× for
-triple replication), survives any 2 nodes gone, reads from 4 hosts in parallel. A pool of
-fewer than 6 nodes falls back to replication. Make it a per-library (or per-folder) setting:
-"Originals 4-of-6, thumbnails replicated to everyone."
+`k`/`n` is **chosen per pool from an availability target and measured node uptime** (see
+"Reliability on hobbyist nodes"), with 4-of-6 as the minimum shape: 1.5× overhead (vs 3× for
+triple replication), survives any 2 nodes gone. Wider codes (8-of-12, 6-of-10, 4-of-8) are what
+hobbyist uptime actually needs. A pool of fewer than 6 nodes falls back to replication. It is a
+per-folder setting through the protection levels; thumbnails are replicated to everyone.
 
 **Deleting and compaction.** Deleting a file drops its references; a chunk with no references
 is dead. A stripe that is mostly dead is **repacked**: its live chunks move into new stripes
@@ -205,6 +206,85 @@ shards without asking anyone; the manifest still records the truth.
   grace period (e.g. 72 h) is treated as lost.
 - **Leaving the pool gracefully**: a node announces it is draining; owners move their shards
   off before it goes.
+
+### Reliability on hobbyist nodes, and how much to trust each one
+
+The nodes are friends' NASes and spare desktops: they reboot for updates, lose power, sit behind
+flaky home internet, and sometimes just disappear. Ursa assumes that and is built so it does
+not show.
+
+**Two different failures.** *Unavailable*: too many hosts are down right now to read a stripe;
+it comes back when they do. *Lost*: too many shards are gone for good before repair replaced
+them. Repair (above) protects against loss; only the code's width and the home node's copies
+protect availability.
+
+**The code must fit the nodes' real uptime.** Hours per year that a stripe cannot be read, if
+each node is independently down a fraction `p` of the time:
+
+| Code | Overhead | Survives | Nodes needed | 98% up | 95% up | 90% up |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4-of-6 | 1.50× | 2 | 6 | 1.3 h | 20 h | 139 h |
+| 6-of-9 | 1.50× | 3 | 9 | 0.2 h | 5.6 h | 73 h |
+| 8-of-12 | 1.50× | 4 | 12 | 0.02 h | 1.6 h | 38 h |
+| 6-of-10 | 1.67× | 4 | 10 | 0.006 h | 0.6 h | 14 h |
+| 4-of-8 | 2.00× | 4 | 8 | 0.001 h | 0.14 h | 3.8 h |
+| 8-of-14 | 1.75× | 6 | 14 | 0 | 0.02 h | 1.6 h |
+
+So **4-of-6 is too thin for hobbyist nodes**: at 95% uptime it leaves some of your files
+unreadable for about 20 hours a year. Wider codes buy far more than extra parity does at the
+same overhead (8-of-12 is 12× better than 4-of-6 for the same 1.5×). The default is therefore
+not a fixed `k`/`n` but a **target** ("readable 99.99% of the time"), and the app picks the
+narrowest code that meets it from the pool's *measured* uptime and size. On a small pool that
+means more overhead; as the pool grows, the same target gets cheaper. (4-of-6 stays the
+benchmark shape and the minimum.)
+
+Real failures are not independent: one house losing power takes every node in it. Placement
+already counts **failure domains** (a friend, a site), and the target is computed over domains,
+not nodes. Two nodes in one closet count as one.
+
+**Speed when a node is offline or slow.** Nothing waits for a missing node:
+
+- The pull scheduler (S2) only ever needs `k` of `n`. An offline node is skipped (a failed
+  request takes it out of rotation until it reconnects, with backoff); a slow node gets
+  proportionally fewer shards; a node that goes silent mid-transfer has its outstanding shards
+  duplicated elsewhere once they are overdue against that node's own measured rate.
+- Reading around a missing shard costs a decode: 0.5–0.8 GB/s per core (S1), far above any link.
+- The home node's **hot cache** of whole copies serves recent and pinned files without the
+  pool at all, so the most common reads never depend on friends' uptime.
+- S2's failure scenarios measure the dip: a node offline from the start, killed mid-read,
+  black-holed mid-read, and throttled to a trickle mid-read.
+
+**Trust is earned and measured, per node.** Every node has a score built from what Ursa
+observes: uptime from heartbeats, audit pass rate, measured throughput, how long it has been in
+the pool. Placement weights by it; reads prefer it.
+
+- **New nodes are on probation**: they hold extra shards *beyond* the code (a 4-of-6 stripe
+  gets a 7th shard there) so nothing depends on them until they have a month of history.
+- **Flaky nodes are demoted** automatically: fewer shards, parity rather than data shards, then
+  none.
+- A failed audit (wrong bytes) removes a node from placement at once and starts repair.
+
+**Ways to limit exposure, all configurable per folder or album:**
+
+| Protection | What it does | Overhead |
+| --- | --- | --- |
+| Standard (default) | Code chosen to meet the availability target from measured uptime | 1.5–2× in the pool |
+| Important | A stricter target (tolerates more failures), plus a whole copy on the home node | 2–2.5× pool + 1× home |
+| Home + pool | Always a whole copy on the home node; the pool is the off-site backup | 1.5× pool + 1× home |
+| Archive | Wide code, no cache; cheapest, slowest to read | ~1.5× pool |
+
+And independent of the level:
+
+- **Per-friend caps**: at most `n − k` shards of a stripe per friend (a hard rule), lowerable to
+  one; a byte cap per friend; and a minimum trust score per folder.
+- **Exclude** a node or a friend from a folder entirely.
+- **Evacuate**: move every shard off a node now (a friend is moving, or you stopped trusting a
+  box); the app shows progress and when exposure is back to normal.
+- **Advanced**: set `k`/`n` directly.
+
+**Make the state visible.** One health line answers "is everything safe?": *All files readable ·
+1 node down for 3 h · repair starts in 69 h*, and each folder shows its margin (*can lose 3 more
+nodes*). A phone that just takes photos should never need more than that line.
 
 ## Speed
 
@@ -424,7 +504,10 @@ shard-to-file mappings.
 - **Every account has an always-on home node.** It is the repair agent and the upload fan-out
   point; phones upload to it once. A user without hardware runs one on a VPS or a friend's box
   (it holds their keys, so "a friend's box" means a container they control).
-- **Default code for originals: 4-of-6.** Pools under 6 nodes fall back to replication.
+- **Default code: chosen from an availability target and measured uptime**, never below
+  4-of-6 (revised 2026-11-23: at 95% node uptime 4-of-6 is unreadable ~20 h a year). Pools under
+  6 nodes fall back to replication. Protection levels per folder, per-friend caps, probation
+  for new nodes.
 - **Standalone repo** at `Z:\ursa`; the iroh/noq patches are copied in, with their NOTICEs.
 - **Phone app: Expo + UniFFI**, the Street Cryptid stack.
 - **Tahoe-LAFS and Ente are references, not dependencies.** We build our own storage layer and
@@ -435,6 +518,8 @@ shard-to-file mappings.
 
 ## Open decisions
 
-1. The fair-share ratio (1:1 suggested: place as many raw shard bytes as you host).
-2. Who may join a pool: invite-only friends (suggested), or friends-of-friends with lower
+1. The default availability target (99.99% suggested, about 1 hour a year) and how much
+   overhead a small pool may spend to meet it before the app says "add a node" instead.
+2. The fair-share ratio (1:1 suggested: place as many raw shard bytes as you host).
+3. Who may join a pool: invite-only friends (suggested), or friends-of-friends with lower
    trust?
