@@ -22,6 +22,9 @@ on:
       label:
         description: What and where the nodes are (copied into the report)
         default: ""
+      relays:
+        description: Relays, space-separated (our own; their token is the S2_RELAY_TOKEN secret). Empty for n0's
+        default: "https://iroh-euw.streetcrypt.id https://iroh-wus.streetcrypt.id"
       extra:
         description: Extra flags for `s2 fetch`
         default: ""
@@ -36,6 +39,8 @@ env:
   SECONDS_PER: ${{ inputs.seconds }}
   LABEL: ${{ inputs.label }}
   EXTRA: ${{ inputs.extra }}
+  RELAYS: ${{ inputs.relays }}
+  S2_RELAY_TOKEN: ${{ secrets.S2_RELAY_TOKEN }}
 
 jobs:
   fetch:
@@ -53,8 +58,9 @@ jobs:
       - run: cargo build --release
       - name: fetch
         run: |
+          relay_flags=""; for r in $RELAYS; do relay_flags="$relay_flags --relay $r"; done
           # shellcheck disable=SC2086
-          ./target/release/s2 fetch --seed "$SEED" --nodes "$NODES" --k "$K" --seconds "$SECONDS_PER" --connect-seconds 120 \
+          ./target/release/s2 fetch $relay_flags --seed "$SEED" --nodes "$NODES" --k "$K" --seconds "$SECONDS_PER" --connect-seconds 120 \
             --label "$LABEL; client: GitHub runner (Azure, US)" --json remote.json $EXTRA | tee remote.md
           cat remote.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4

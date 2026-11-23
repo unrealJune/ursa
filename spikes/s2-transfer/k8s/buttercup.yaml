@@ -68,8 +68,22 @@ spec:
             - name: SEED
               valueFrom:
                 configMapKeyRef: { name: s2, key: seed }
+            - name: RELAYS
+              valueFrom:
+                configMapKeyRef: { name: s2, key: relays }
+            # Our relays' auth token, copied from trail-stash's Secret (see README). Optional, so
+            # the pods still start (on n0's relays) without it.
+            - name: S2_RELAY_TOKEN
+              valueFrom:
+                secretKeyRef: { name: s2-relay, key: token, optional: true }
           # The pod's ordinal (s2-0 … s2-4) is the node index.
-          command: ["sh", "-c", "exec /opt/s2/s2 serve --seed \"$SEED\" --index \"${HOSTNAME##*-}\" --max-seconds 86400"]
+          command:
+            - sh
+            - -c
+            - |
+              set -- serve --seed "$SEED" --index "${HOSTNAME##*-}" --max-seconds 86400
+              for r in $RELAYS; do set -- "$@" --relay "$r"; done
+              exec /opt/s2/s2 "$@"
           securityContext: *restricted
           resources:
             requests: { cpu: 100m, memory: 160Mi }
@@ -86,4 +100,6 @@ metadata:
   name: s2
   namespace: ursa-s2
 data:
-  seed: ursa-buttercup-1
+  seed: ursa-buttercup-2
+  # Street Cryptid's relays (the ones trail-stash uses), space-separated. Empty: n0's public ones.
+  relays: https://iroh-euw.streetcrypt.id https://iroh-wus.streetcrypt.id
