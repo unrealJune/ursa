@@ -767,7 +767,7 @@ async fn fetch(
             let _ = tokio::time::timeout(Duration::from_secs(5), send_op(c, OP_SHUTDOWN)).await;
         }
     }
-    endpoint.close().await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), endpoint.close()).await;
     Ok(())
 }
 

@@ -21,11 +21,6 @@ on:
       extra:
         description: Extra flags for `s2 fetch`
         default: ""
-  push:
-    paths:
-      - spikes/s2-transfer/src/**
-      - spikes/s2-transfer/Cargo.*
-      - spikes/s2-transfer/netns.sh
 
 permissions:
   contents: read
