@@ -114,7 +114,7 @@ jobs:
   faults:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
@@ -129,24 +129,31 @@ jobs:
         run: |
           chmod +x s2
           NS=spikes/s2-transfer/netns.sh
-          start() { sudo ip netns exec "n$1" ./s2 serve --local --seed faults --index "$1" --max-seconds 2400 --ticket-out "t$1.txt" > "serve$1.log" 2>&1 & }
-          wait_ticket() { for _ in $(seq 60); do [ -s "t$1.txt" ] && break; sleep 1; done; }
+          # `exec` so pid$i is the server itself: kill -9 is a crash, with no goodbye on the wire.
+          start() {
+            rm -f "t$1.txt"
+            sudo ip netns exec "n$1" sh -c "echo \$\$ > pid$1; exec ./s2 serve --local --seed faults --index $1 --max-seconds 3000 --ticket-out t$1.txt" > "serve$1.log" 2>&1 &
+            for _ in $(seq 60); do [ -s "t$1.txt" ] && break; sleep 1; done
+          }
           peers() { p=""; for i in 0 1 2 3 4 5; do p="$p --peer $(cat t$i.txt)"; done; echo "$p"; }
+          # One strategy per process, so a fault in one run cannot leak into the next.
           run() {
-            name=$1; shift
+            name=$1; strategy=$2; shift 2
+            sleep 10  # let queues from the previous run drain
             # shellcheck disable=SC2046
-            sudo ip netns exec client ./s2 fetch --local $(peers) --seconds 60 --strategies race,pull --connect-seconds 15               --label "fastest node $name; uploads 100/50/40/20/200/8 Mbit/s" --json "s2-fault-$name.json" "$@" | tee "s2-fault-$name.md"
+            sudo ip netns exec client ./s2 fetch --local $(peers) --seconds 60 --strategies "$strategy" --connect-seconds 20               --label "fastest node (n4) $name; $strategy; uploads 100/50/40/20/200/8 Mbit/s"               --json "s2-fault-$name-$strategy.json" "$@" | tee "s2-fault-$name-$strategy.md"
           }
           for i in 0 1 2 3 4 5; do start "$i"; done
-          for i in 0 1 2 3 4 5; do wait_ticket "$i"; done
-          run healthy
-          run killed-at-20s --fault-at 20 --fault "pkill -f -- '--index 4 '"
-          run offline
-          rm -f t4.txt; start 4; wait_ticket 4
-          run blackholed-at-20s --fault-at 20 --fault "ip netns exec n4 tc qdisc change dev eth0 root netem loss 100%"
-          sudo bash "$NS" restore 4
-          run slowed-to-2mbit-at-20s --fault-at 20 --fault "ip netns exec n4 tc qdisc change dev eth0 root netem delay 10ms rate 2mbit limit 100000"
-          sudo bash "$NS" restore 4
+          for st in race pull; do
+            run healthy "$st"
+            run killed-at-20s "$st" --fault-at 20 --fault "kill -9 $(cat pid4)"
+            run offline "$st"
+            start 4
+            run blackholed-at-20s "$st" --fault-at 20 --fault "ip netns exec n4 tc qdisc change dev eth0 root netem loss 100%"
+            sudo bash "$NS" restore 4
+            run slowed-to-2mbit-at-20s "$st" --fault-at 20 --fault "ip netns exec n4 tc qdisc change dev eth0 root netem delay 10ms rate 2mbit limit 100000"
+            sudo bash "$NS" restore 4
+          done
           cat s2-fault-*.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
