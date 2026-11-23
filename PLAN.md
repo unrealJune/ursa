@@ -208,9 +208,22 @@ shards without asking anyone; the manifest still records the truth.
 
 ## Speed
 
-- **Reads**: request from `k + 1` (or more) hosts, use the first `k` shards to arrive per
-  stripe, cancel the rest. Pipeline several stripes ahead for video. Throughput then scales
-  with the number of hosts instead of the slowest one.
+- **Reads: a pull scheduler, not a race** (S2). Each host keeps two requests in flight and
+  takes the oldest stripe that still needs a shard it holds; any `k` of the `n` hosts complete
+  a stripe, so fast hosts serve more stripes and slow ones fewer, and every uplink stays busy.
+  An idle host duplicates the shard holding up the oldest stripe once that stripe is overdue.
+  Measured against throttled home-like uplinks: 2.7× a fixed assignment and 1.3× racing
+  `k + 1` (Storj's long-tail cancellation). Racing also burns friends' upload on shards that
+  lose: the two slowest hosts sent bytes nobody used. Keep at least 8 stripes (64 MiB) in flight
+  at home-link speeds; 4 cost a quarter of the throughput.
+- **Striping helps most when hosts are alike.** Each stripe needs `k` *different* hosts, so no
+  host can supply more than `1/k` of the bytes. Six similar uplinks read at nearly their sum;
+  one fat uplink among thin ones is capped at a quarter (S2: 197 Mbit/s striped vs 188 from the
+  fastest host alone). Your own home node is usually that fat, close host, so it also keeps
+  **whole copies of what you open often** (a hot cache), and reads go to it first.
+- **Relays are a fallback, not a path.** n0's public relays moved almost nothing in S2, and
+  GitHub's VMs could not hole-punch each other. Ursa runs its own relays (as Street Cryptid
+  does), and the real numbers come from our own nodes.
 - **Uploads** are bounded by *your* uplink and cost `n/k` × the file size. Two mitigations:
   1. **Upload via your own node.** A phone sends the encrypted segments to your home node over
      LAN (or once, over the internet), and the home node does the coding and fan-out. It holds
@@ -328,7 +341,7 @@ suite runs against each, and the app does not change between them.
 | --- | --- | --- |
 | S0 | What Ente gets right | Notes on Ente's backup edge cases (permissions, limited library, Live Photos, edits, HEIC/RAW, duplicates), timeline/album UX and key layout, written into this repo |
 | S1 | Chunk size, stripe size and `k`/`n` vs throughput | FastCDC + encrypt + RS-code + hash a 4 GB video on a phone-class ARM core and a desktop; table of GB/s by stripe size and code, chunking and cipher costs, degraded reads |
-| S2 | iroh bulk throughput | Parallel fetch from 6 nodes over WAN (two homes + a VPS), long-tail cancellation on; MB/s vs a single HTTPS download |
+| S2 | iroh bulk throughput | Parallel fetch from 6 nodes: loopback ceiling, throttled home-like uplinks, then our own nodes over the real internet; goodput by read strategy |
 | S3 | PQ libraries | X-Wing HPKE and ML-DSA-65 crates chosen, building on iOS, Android, wasm; wrap/unwrap timings |
 | S4 | PQ transport | Can iroh's rustls config take `X25519MLKEM768`? Patch size if not |
 | S5 | iOS photo upload | How much a `BGProcessingTask` + background `URLSession` upload can move per night, and whether it must go over HTTP to the home node |
@@ -339,6 +352,14 @@ M2 core writes 4-of-6 at ~1 GB/s and reads at 1.4 GB/s, against home uplinks of 
 Decided: aws-lc-rs AES-256-GCM (fastest on Apple silicon and x86, level with ring on Neoverse, and it ships ML-KEM; RustCrypto's ran in software on ARM until its cfg flags were turned on); 8 MiB stripes,
 4-of-6, coded in 256 KiB column slices; BLAKE3 shard ids, which are the largest cost on ARM.
 Details and tables: `spikes/s1-codec/README.md`.
+
+**S2 (2026-11-23): strategies measured, real-internet run pending.** `spikes/s2-transfer`. iroh
+carries 2.2–2.4 Gbit/s per connection on loopback, so the protocol is not the limit at home
+speeds. Against six throttled uplinks (100/50/40/20/200/8 Mbit/s), the pull scheduler reached
+197 Mbit/s (theory: 236), racing `k + 1` 148, a fixed assignment 74, the best single host 188.
+Decided: pull scheduling with hedging, at least 8 stripes in flight, a hot cache on the home
+node, our own relays. Still owed: the same run between our own nodes over the internet (NAT
+traversal and relay speed are untested). Details: `spikes/s2-transfer/README.md`.
 
 S0, S3 and S5 shape Phase 1. S1 and S2 are not built on until Phase 3, but they run first
 anyway: parallel coded reads over iroh being fast is Ursa's reason to exist, and if the
@@ -379,7 +400,7 @@ Behind `ObjectStore`, with no app changes:
 
 - `Replicated`: whole copies on friends' nodes. Invites, per-friend quotas, fair-share
   accounting, signed receipts, leases and GC.
-- `Coded`: 4-of-6 shards, placement with failure domains, long-tail-cancelled reads, audit,
+- `Coded`: 4-of-6 shards, placement with failure domains, pull-scheduled reads with a hot cache on the home node, audit,
   repair by the home node, draining a node.
 - Done when: in a pool of our friends, unplugging any two nodes loses nothing, unplugging the
   home node of a friend loses nothing of anyone else's, and reads of originals are faster than
