@@ -62,6 +62,9 @@ enum Cmd {
         /// Write this node's endpoint ticket (with its direct addresses) here.
         #[arg(long)]
         ticket_out: Option<PathBuf>,
+        /// No relays: direct addresses only (an isolated test network).
+        #[arg(long)]
+        local: bool,
     },
     /// Read stripes from the nodes under each strategy and report goodput.
     Fetch {
@@ -98,6 +101,9 @@ enum Cmd {
         /// Free-form description of the setup, copied into the report.
         #[arg(long, default_value = "")]
         label: String,
+        /// No relays: direct addresses only (an isolated test network).
+        #[arg(long)]
+        local: bool,
     },
 }
 
@@ -117,7 +123,7 @@ fn node_secret(seed: &str, index: usize) -> SecretKey {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Serve { seed, index, max_seconds, ticket_out } => serve(seed, index, max_seconds, ticket_out).await,
+        Cmd::Serve { seed, index, max_seconds, ticket_out, local } => serve(seed, index, max_seconds, ticket_out, local).await,
         Cmd::Fetch {
             seed,
             nodes,
@@ -132,6 +138,7 @@ async fn main() -> Result<()> {
             shutdown,
             json,
             label,
+            local,
         } => {
             let addrs: Vec<EndpointAddr> = if !peers.is_empty() {
                 peers.iter().map(|p| parse_peer(p)).collect::<Result<_>>()?
@@ -140,7 +147,7 @@ async fn main() -> Result<()> {
                 (0..nodes).map(|i| EndpointAddr::new(node_secret(&seed, i).public())).collect()
             };
             let params = Params { k, stripe: stripe_mib * MIB, seconds, window, per_node };
-            fetch(addrs, params, strategies, connect_seconds, shutdown, json, label).await
+            fetch(addrs, params, strategies, connect_seconds, shutdown, json, label, local).await
         }
     }
 }
@@ -203,18 +210,26 @@ impl ProtocolHandler for Server {
     }
 }
 
-async fn serve(seed: String, index: usize, max_seconds: u64, ticket_out: Option<PathBuf>) -> Result<()> {
-    let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-        .secret_key(node_secret(&seed, index))
-        .bind()
-        .await?;
+async fn bind(secret: SecretKey, local: bool) -> Result<Endpoint> {
+    let mut b = Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
+    if local {
+        b = b.relay_mode(iroh::RelayMode::Disabled);
+    }
+    let endpoint = b.bind().await?;
+    if !local {
+        let _ = tokio::time::timeout(Duration::from_secs(30), endpoint.online()).await;
+    }
+    Ok(endpoint)
+}
+
+async fn serve(seed: String, index: usize, max_seconds: u64, ticket_out: Option<PathBuf>, local: bool) -> Result<()> {
+    let endpoint = bind(node_secret(&seed, index), local).await?;
     let mut data = vec![0u8; SERVE_BUF];
     blake3::Hasher::new().update(seed.as_bytes()).finalize_xof().fill(&mut data);
     let shutdown = Arc::new(Notify::new());
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, Server { data: Arc::new(data), shutdown: shutdown.clone() })
         .spawn();
-    let _ = tokio::time::timeout(Duration::from_secs(30), endpoint.online()).await;
     let ticket = iroh_tickets::endpoint::EndpointTicket::new(endpoint.addr()).to_string();
     println!("node {index} id {} ticket {ticket}", endpoint.id());
     if let Some(p) = ticket_out {
@@ -519,17 +534,14 @@ async fn fetch(
     shutdown: bool,
     json: Option<PathBuf>,
     label: String,
+    local: bool,
 ) -> Result<()> {
     let n = addrs.len();
     if p.k == 0 || p.k > n || n > 64 {
         bail!("need 0 < k <= nodes <= 64");
     }
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-        .secret_key(SecretKey::from_bytes(&blake3::derive_key("ursa s2 client key", &nanos.to_le_bytes())))
-        .bind()
-        .await?;
-    let _ = tokio::time::timeout(Duration::from_secs(30), endpoint.online()).await;
+    let endpoint = bind(SecretKey::from_bytes(&blake3::derive_key("ursa s2 client key", &nanos.to_le_bytes())), local).await?;
 
     let until = Instant::now() + Duration::from_secs(connect_seconds);
     let t = Instant::now();
