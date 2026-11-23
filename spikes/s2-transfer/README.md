@@ -68,11 +68,48 @@ moved into namespaces.
    throughput at these speeds. The window should follow the bandwidth-delay product and start
    small for video, where the first stripe's latency is what the viewer sees.
 5. **Two requests in flight per node is enough**; four changed nothing.
-6. **Hedging rarely fired** (2 hedges in 30 s) and the slowest stripe still took 20 s on the
-   8 Mbit/s node. A smarter rule (skip a node whose estimated finish is later than the median,
-   or hedge on estimated finish rather than age) is the next refinement for tail latency.
+6. **Hedging on age rarely fired** (2 hedges in 30 s) and the slowest stripe took 20 s on the
+   8 Mbit/s node. It now hedges on each node's measured rate instead (a request 2.5× past what
+   its node's speed predicts is re-requested elsewhere), which is what makes the failure runs
+   below recover.
 7. **Relays cannot carry bulk data**, at least n0's public ones. Ursa needs its own relays and
    direct paths; the real-internet run between our own nodes measures both.
+
+## When a node fails mid-read (run 45263499125)
+
+The shaped network again, 60 s per run, one strategy per process. 20 s in, the **fastest node
+(n4, 200 Mbit/s) fails** one of four ways: killed with `kill -9` (a crash, no goodbye on the wire),
+black-holed (every packet dropped: a router or ISP failure, the connection just goes silent),
+throttled to 2 Mbit/s (a node that is up but useless), or already offline before the read starts.
+Files: [results/faults](results/faults/).
+
+Goodput over the run and by 5 s window (Mbit/s; the fault lands at 20 s, the fourth column):
+
+| Strategy, fault | Overall | 0-5 | 5-10 | 10-15 | 15-20 | 20-25 | 25-30 | 30-35 | 35-40 | ... 55-60 | Stripe p90 / max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| pull, healthy | **217** | 161 | 228 | 228 | 228 | 215 | 201 | 228 | 242 | 188 | 7.3 / 8.1 s |
+| pull, killed | 147 | 161 | 228 | 228 | 215 | 188 | 107 | 94 | 121 | 94 | 10.3 / 13.3 s |
+| pull, black-holed | 147 | 148 | 242 | 228 | 215 | 188 | 107 | 94 | 121 | 94 | 10.3 / 13.3 s |
+| pull, slowed to 2 Mbit/s | 147 | 161 | 228 | 228 | 215 | 188 | 107 | 94 | 121 | 94 | 10.3 / 13.3 s |
+| pull, offline from the start | 103 | 81 | 107 | 107 | 107 | 94 | 94 | 107 | 107 | 94 | 12.4 / 13.1 s |
+| race, healthy | 150 | 134 | 161 | 148 | 148 | 161 | 134 | 161 | 161 | 134 | 7.1 / 7.2 s |
+| race, killed | 103 | 134 | 161 | 148 | 148 | 161 | 54 | 54 | 67 | 81 | 15.1 / 18.8 s |
+| race, offline from the start | 74 | 54 | 81 | 81 | 81 | 67 | 67 | 81 | 81 | 67 | 14.3 / 14.4 s |
+
+What it shows:
+
+1. **No stall.** With `pull`, every 5 s window after the failure still delivered 94-121 Mbit/s.
+   The theoretical ceiling for the five uplinks that are left (100/50/40/20/8, each capped at a
+   quarter) is 112 Mbit/s; `pull` runs at it within 5 seconds of losing the fastest node.
+2. **A silent node costs the same as a crashed one.** Killed, black-holed and slowed are
+   identical: the scheduler does not wait for QUIC to time out. A request overdue against its
+   node's own measured rate is re-requested from another node (19-23 hedges per run), and the
+   slowest stripe grew from 8 to 13 s, once.
+3. **What is lost is capacity, not scheduling.** The 200 Mbit/s node supplied a quarter of the
+   bytes; without it the pool is a 112 Mbit/s pool. `race` falls to ~70 Mbit/s (the fourth
+   fastest node's rate × 4), half of what `pull` keeps.
+4. **So the defences are breadth and the home node.** With twelve similar nodes, losing one
+   costs a twelfth. The home node's hot cache keeps the most-read files off the pool entirely.
 
 ## Still owed
 

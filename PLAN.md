@@ -251,8 +251,12 @@ not nodes. Two nodes in one closet count as one.
 - Reading around a missing shard costs a decode: 0.5–0.8 GB/s per core (S1), far above any link.
 - The home node's **hot cache** of whole copies serves recent and pinned files without the
   pool at all, so the most common reads never depend on friends' uptime.
-- S2's failure scenarios measure the dip: a node offline from the start, killed mid-read,
-  black-holed mid-read, and throttled to a trickle mid-read.
+- **Measured (S2):** with the fastest of six nodes (200 Mbit/s) killed, black-holed or slowed to
+  2 Mbit/s 20 s into a read, every 5 s window afterwards still delivered 94-121 Mbit/s, at the
+  112 Mbit/s ceiling of the five nodes left, with no stall. A silent node costs the same as a
+  crashed one, because requests are judged against each node's own measured speed. What a
+  failure takes away is that node's capacity, which is why breadth and the home node's cache
+  are the defence.
 
 **Trust is earned and measured, per node.** Every node has a score built from what Ursa
 observes: uptime from heartbeats, audit pass rate, measured throughput, how long it has been in
@@ -437,8 +441,10 @@ Details and tables: `spikes/s1-codec/README.md`.
 carries 2.2–2.4 Gbit/s per connection on loopback, so the protocol is not the limit at home
 speeds. Against six throttled uplinks (100/50/40/20/200/8 Mbit/s), the pull scheduler reached
 197 Mbit/s (theory: 236), racing `k + 1` 148, a fixed assignment 74, the best single host 188.
-Decided: pull scheduling with hedging, at least 8 stripes in flight, a hot cache on the home
-node, our own relays. Still owed: the same run between our own nodes over the internet (NAT
+Losing the fastest node mid-read: no stall; goodput drops to the
+remaining nodes' ceiling within 5 s (94-121 Mbit/s against 112), whether it crashed, went silent
+or slowed to a trickle. Decided: pull scheduling with rate-based hedging, at least 8 stripes in
+flight, a hot cache on the home node, our own relays. Still owed: the same run between our own nodes over the internet (NAT
 traversal and relay speed are untested). Details: `spikes/s2-transfer/README.md`.
 
 S0, S3 and S5 shape Phase 1. S1 and S2 are not built on until Phase 3, but they run first
