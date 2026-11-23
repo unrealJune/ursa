@@ -47,14 +47,20 @@ per chunk, which costs the same per byte plus a 16-byte tag per chunk.
 | Xeon 8573C | 1.65 | 2.44 | 0.87 | 1.75 (2) | 2.68 (2) | 0.90 (2) |
 | Ryzen laptop, battery | 0.51 | 0.71 | 0.23 | 2.00 (16) | 3.58 (16) | 1.44 (16) |
 
-AES-256-GCM, one core, seal GB/s:
+AES-256-GCM, one core, GB/s seal / open. Second CI run (2026-11-23), with RustCrypto's ARMv8
+flags on (`.cargo/config.toml`) and aws-lc-rs added; aws-lc-rs needs CMake, so it is not built on
+Windows or the laptop:
 
-| Machine | ring | RustCrypto `aes-gcm` | ring ChaCha20-Poly1305 | RustCrypto XChaCha20-Poly1305 |
+| Machine | aws-lc-rs | ring | RustCrypto `aes-gcm` (flags on) | RustCrypto, flags off (first run) |
 | --- | ---: | ---: | ---: | ---: |
-| Apple M2 Pro | **5.25** | 0.15 | 1.60 | 0.44 |
-| Neoverse N2 | **2.61** | 0.14 | 1.09 | 0.43 |
-| Xeon 8573C | **4.02** | 1.14 | 1.64 | 1.10 |
-| Ryzen laptop, battery | **1.42** | 0.51 | 0.97 | 0.61 |
+| Apple M2 Pro | **6.44 / 7.47** | 4.81 / 4.92 | 2.01 / 1.93 | 0.15 |
+| Neoverse N2 | **2.66 / 2.73** | 2.61 / 2.76 | 0.67 / 0.67 | 0.14 |
+| Xeon 8573C | **5.92 / 7.54** | 4.94 / 5.93 | 1.42 / 1.50 | 1.14 |
+| Windows CI (Intel) | n/a | 4.24 / 5.53 | 1.02 / 1.03 | 1.01 |
+
+ChaCha20-Poly1305 is 1.1–2.0 GB/s per core everywhere: only a fallback for a CPU without AES
+instructions. CI VMs are noisy run to run (ring on the M2: 5.25 then 4.81), but the
+aws-lc-rs lead on open (+34–52% on M2, +27% on Xeon) is well outside that.
 
 ## Findings
 
@@ -63,10 +69,14 @@ AES-256-GCM, one core, seal GB/s:
    at 1.4 GB/s, and reads with two shards lost at 0.8 GB/s; five cores give 3.7 / 5.8 / 3.8.
    Home uplinks are 0.02–1 Gbit/s. A phone will spend its battery on the radio, not on this.
    A real phone run is still owed (the Android binary is built).
-2. **ring's AES-256-GCM, decisively.** RustCrypto's `aes-gcm` runs in **software on ARM**
-   (0.15 GB/s: its ARMv8 backend is opt-in behind a `cfg` flag), 35× slower than ring's 5.3
-   GB/s on the same core. On x86 ring is still 3.5× faster. ring's ChaCha20 is the fallback
-   for a device without AES instructions. (aws-lc-rs may be faster again; one row later.)
+2. **aws-lc-rs's AES-256-GCM.** It is the fastest on Apple silicon (6.4 / 7.5 GB/s seal / open
+   per core, +34–52% over ring) and x86 (+20–27%), and level with ring on Neoverse N2. It also
+   ships ML-KEM, which the key-wrapping half of the design needs and ring does not have, so one
+   library covers both. Cost: it builds C with CMake (Windows also needs NASM or its prebuilt
+   objects); it cross-compiles for iOS and Android, as rustls does with it. RustCrypto's
+   `aes-gcm` ran in **software on ARM** until its `aes_armv8` / `polyval_armv8` cfg flags were
+   turned on (0.15 → 2.0 GB/s on the M2) and is still 2.5–4× slower than either; the flags stay
+   on in `.cargo/config.toml` for anything that pulls it in.
 3. **On ARM, BLAKE3 is the write cost**: 67–76% of single-core write time and ~40% of a read
    (1.4–1.8 GB/s per ARM core vs 5 on x86). It names every shard and backs verification, so it
    stays; it already runs per shard in parallel. If writes ever need to be cheaper on phones,
@@ -89,8 +99,10 @@ AES-256-GCM, one core, seal GB/s:
 
 ## Decisions
 
-- Cipher: ring AES-256-GCM; ring ChaCha20-Poly1305 only where AES instructions are missing.
-  Never RustCrypto `aes-gcm` on ARM.
+- Cipher: AES-256-GCM from **aws-lc-rs**, the same library as ML-KEM (S3 confirms its ML-KEM and
+  X25519 make the X-Wing combiner). ring is the fallback if aws-lc-rs fails to build somewhere
+  (within 0–35% of it). ChaCha20-Poly1305 only where AES instructions are missing. RustCrypto
+  AES only with the ARMv8 flags on.
 - Stripes: 8 MiB, 4-of-6, coded and decoded in 256 KiB column slices (tunable).
 - Shard ids: BLAKE3, kept despite being the main ARM cost.
 - Reed–Solomon: `reed-solomon-simd` for now; revisit with a cached-matrix GF(2⁸) code if

@@ -95,10 +95,10 @@ What follows from it:
 
 | Job | Choice | Why |
 | --- | --- | --- |
-| Content encryption | AES-256-GCM (ring), one key per chunk (derived from an account secret and the chunk's content) | Hardware AES on every phone and desktop. Each key encrypts exactly one plaintext, so nonces cannot repeat. S1: ring is ~3× RustCrypto's AES-GCM per core. XChaCha20-Poly1305 is the fallback if a platform lacks AES instructions. |
+| Content encryption | AES-256-GCM (aws-lc-rs), one key per chunk (derived from an account secret and the chunk's content) | Post-quantum as it stands: a 256-bit key keeps ~128 bits against Grover. Hardware AES on every phone and desktop; S1 measured 6.4 / 7.5 GB/s seal / open on one Apple M2 core. Each key encrypts exactly one plaintext, so nonces cannot repeat. aws-lc-rs also ships ML-KEM, so one library covers both halves. XChaCha20-Poly1305 is the fallback if a platform lacks AES instructions. |
 | Hashing / content IDs | BLAKE3 | Fast (SIMD, parallel), and **Bao** gives verified streaming: a range of a file can be checked without the whole thing. iroh-blobs is built on it. |
 | Key derivation | BLAKE3 `derive_key` / HKDF-SHA256 | |
-| Key wrapping across identities | HPKE (RFC 9180) with **X-Wing** (X25519 + ML-KEM-768) | Hybrid: breaks only if both break. X-Wing is the IETF combiner, small and audited implementations exist (libcrux). |
+| Key wrapping across identities | HPKE (RFC 9180) with **X-Wing** (X25519 + ML-KEM-768) | Hybrid: breaks only if both break. X-Wing is the IETF combiner, small and audited implementations exist (libcrux). S3 checks whether aws-lc-rs's ML-KEM-768 and X25519 can build it, so one crypto library covers everything. |
 | Signatures (manifests, device certs, quota receipts) | Hybrid **Ed25519 + ML-DSA-65**, both must verify | Forgery needs a quantum computer *at signing-verification time*, which is not a harvest-later threat, so this is lower priority than the KEM; still cheap enough to do from day one and painful to retrofit. |
 | Transport | iroh QUIC (TLS 1.3, Ed25519 node identity) | Node identity is classical. Acceptable: impersonating a node needs a live quantum attack and still yields only ciphertext. |
 
@@ -336,7 +336,7 @@ suite runs against each, and the app does not change between them.
 **S1 done (2026-11-23), except a real-phone run.** `spikes/s1-codec`, results on Apple
 silicon, Linux arm64/x86-64, Windows and the laptop. The CPU is never the bottleneck: one Apple
 M2 core writes 4-of-6 at ~1 GB/s and reads at 1.4 GB/s, against home uplinks of 0.02–1 Gbit/s.
-Decided: ring AES-256-GCM (RustCrypto's runs in software on ARM, 35× slower); 8 MiB stripes,
+Decided: aws-lc-rs AES-256-GCM (fastest on Apple silicon and x86, level with ring on Neoverse, and it ships ML-KEM; RustCrypto's ran in software on ARM until its cfg flags were turned on); 8 MiB stripes,
 4-of-6, coded in 256 KiB column slices; BLAKE3 shard ids, which are the largest cost on ARM.
 Details and tables: `spikes/s1-codec/README.md`.
 
