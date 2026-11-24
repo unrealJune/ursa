@@ -76,7 +76,6 @@
         "expo-image-picker",
         {
           "photosPermission": "Ursa uploads the photos you pick.",
-          "cameraPermission": false,
           "microphonePermission": false
         }
       ],

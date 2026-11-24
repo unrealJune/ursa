@@ -2,7 +2,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import { useRef } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Linking, StyleSheet, View } from 'react-native';
 
 import { deliverScan } from '@/core/handoff';
 import { useTheme } from '@/theme';
@@ -25,7 +25,12 @@ export default function Scan() {
         <Txt color={c.onSurfaceVariant} style={{ textAlign: 'center' }}>
           Ursa reads link, node and invite codes from your other devices. Nothing is recorded.
         </Txt>
-        <Button label="Allow camera" onPress={request} />
+        {/* After a denial Android stops showing its prompt, and request() answers at once. */}
+        {permission.canAskAgain ? (
+          <Button label="Allow camera" onPress={request} />
+        ) : (
+          <Button label="Open settings" onPress={() => Linking.openSettings()} />
+        )}
       </Centered>
     );
   }
