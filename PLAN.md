@@ -505,7 +505,7 @@ Behind `ObjectStore`, with no app changes:
   home node of a friend loses nothing of anyone else's, and reads of originals are faster than
   from the home node alone.
 
-### Milestone M2: identities, the pool, and losing a home node (in progress, 2026-11-23)
+### Milestone M2: identities, the pool, and losing a home node (done, 2026-11-23)
 
 Pulled forward from Phases 2 and 3 because "what if my node dies?" decides the design. The
 question it answers: **if my home node and its storage are destroyed, can I get every photo
@@ -581,6 +581,28 @@ driven by the CLI in an in-cluster Job: onboard all five, befriend, upload, add 
 by link, then delete one person's node *and its bucket*, recover that person from the key file
 alone (pkarr lookup), and check every file re-downloads byte-identical; then repair and check
 the pool is back to five shards per chunk.
+
+**Result (2026-11-23, node 0.3.0): the answer is yes.** `scripts/pool-test.py` passes on five
+local nodes and on five Buttercup nodes (`apps/ursa/test` in Buttercup: one chart release per
+person, one bucket prefix each, driven from a laptop on the LAN rather than an in-cluster Job).
+On Buttercup: 30.6 MB uploaded in 3.1 s, a second device linked by code, alice's node taken
+away, her account recovered on a fresh device from the key file alone through the pkarr
+locator, every file byte-identical from the four survivors (and again after repair), 32 of 32
+objects rebuilt onto her replacement node, 0 lost. What the runs taught:
+
+- **A dead node must cost one dial, not one per chunk.** Repair touched it per object and took
+  12+ minutes; a node that failed to answer now fails fast for 60 s (`DOWN_BACKOFF`), a fetch
+  asks for a spare shard after 2 s with nothing arriving, and loading the head waits 3 s past
+  the first answer instead of for every node. Repair now takes about a minute.
+- **A file's id must survive repair.** Repair re-seals a manifest whose chunks moved; the index
+  entry keeps the file's id and records the new manifest and a placement revision (newest wins a
+  merge). Before, every repaired file vanished from other devices' views.
+- **Finding an account needs the relays its nodes use.** A device that knows only node ids (the
+  locator) reaches them through their home relays, so a client must carry the same relay list
+  and token as the nodes. The apps' defaults must match the nodes they will meet.
+- Still slow after a loss: a fresh process spends up to ~10 s per download learning which node
+  is dead, and the dead node stays in the pool until someone removes it. Repair should offer to
+  drop a node that holds nothing it can serve.
 
 ### Phase 4: polish
 
