@@ -79,6 +79,9 @@ jobs:
     env:
       URSA_VERSION: ${{ needs.version.outputs.version }}
       URSA_VERSION_CODE: ${{ github.run_number }}
+      # Developer telemetry: the JS layer and the Rust core send their logs as OTLP to the
+      # collector this repository variable names (src/core/telemetry.ts). Unset sends nothing.
+      EXPO_PUBLIC_OTEL_ENDPOINT: ${{ vars.OTEL_ENDPOINT }}
       # A pull-request build only has to install on a test phone, and those are arm64; x86_64 is
       # for emulators and doubled both the Rust and the C++ work. Releases ship both.
       ABIS: ${{ github.event_name == 'pull_request' && 'arm64-v8a' || 'arm64-v8a x86_64' }}

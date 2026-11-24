@@ -3,6 +3,7 @@ import { errorText, type LibraryItem, Ursa } from 'ursa-core';
 import { saveFile } from './files';
 import { syncAccount } from './session';
 import { createStore, singleFlight } from './state';
+import { log } from './telemetry';
 
 /** A batch the person started on several files at once (delete, save). */
 export type Bulk = { label: string; done: number; failed: number; total: number };
@@ -44,6 +45,7 @@ export const loadLibrary = singleFlight(async ({ fromNodes }: { fromNodes: boole
       lastSync = Date.now();
     } catch (e) {
       error = errorText(e);
+      log('WARN', `library: ${error}`);
     }
   }
   try {
@@ -52,6 +54,7 @@ export const loadLibrary = singleFlight(async ({ fromNodes }: { fromNodes: boole
     library.set({ items, loaded: true, error });
   } catch (e) {
     library.set({ error: errorText(e) });
+    log('WARN', `library: ${errorText(e)}`);
   } finally {
     library.set({ loading: false });
   }

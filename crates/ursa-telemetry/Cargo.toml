@@ -1,0 +1,18 @@
+[package]
+name = "ursa-telemetry"
+description = "Developer telemetry for every Ursa binary: tracing events as OTLP logs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+opentelemetry = { version = "0.33", default-features = false, features = ["logs"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["logs"] }
+opentelemetry-appender-tracing = "0.33"
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["logs", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+# The same reqwest iroh brings in; the exporter is handed a client built with its own roots.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+webpki-root-certs = "1"

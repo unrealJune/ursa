@@ -214,15 +214,22 @@ fn init_logging() {
             use tracing_subscriber::util::SubscriberInitExt;
             let _ = tracing_subscriber::registry()
                 .with(logcat::layer())
+                .with(ursa_telemetry::layer())
                 .try_init();
         }
         #[cfg(not(target_os = "android"))]
         {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "info,iroh=warn,noq=warn".into()),
+            use tracing_subscriber::Layer;
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            let _ = tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer().with_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "info,iroh=warn,noq=warn".into()),
+                    ),
                 )
+                .with(ursa_telemetry::layer())
                 .try_init();
         }
     });
@@ -400,6 +407,29 @@ impl UrsaCore {
             inner.status(open_error).await
         })
         .await
+    }
+
+    /// Starts sending the core's logs to an OTLP collector, as `ursa-android` / `core` with the
+    /// app's telemetry id (the app's own JavaScript exports under the same id). Once per process;
+    /// returns whether this call started it.
+    pub fn configure_telemetry(
+        &self,
+        endpoint: String,
+        instance_id: String,
+        version: String,
+    ) -> Res<bool> {
+        Ok(ursa_telemetry::configure(ursa_telemetry::Config {
+            endpoint,
+            service: "ursa-android".into(),
+            layer: "core".into(),
+            version,
+            instance_id,
+        })?)
+    }
+
+    /// Sends the core's buffered logs now (the app is going to the background).
+    pub fn flush_telemetry(&self) {
+        ursa_telemetry::flush();
     }
 
     pub async fn status(&self) -> Res<Status> {

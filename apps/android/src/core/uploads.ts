@@ -5,6 +5,7 @@ import { errorText, type UploadMeta, Ursa, withProgress } from 'ursa-core';
 import { upsert } from './library';
 import { session } from './session';
 import { createStore, singleFlight } from './state';
+import { log } from './telemetry';
 
 export type QueueItem = { uri: string; meta: UploadMeta; assetId?: string };
 
@@ -74,6 +75,7 @@ async function drain() {
       } catch (e) {
         if (gen !== generation) break;
         uploads.set((u) => ({ failed: u.failed + 1, lastError: `${name}: ${errorText(e)}` }));
+        log('WARN', `upload failed: ${errorText(e)}`, { mime: job.meta.mime });
       }
     }
   } finally {
@@ -132,6 +134,7 @@ export const backupNow = singleFlight(async () => {
     enqueue(fresh);
   } catch (e) {
     uploads.set({ lastError: errorText(e) });
+    log('WARN', `backup scan failed: ${errorText(e)}`);
   } finally {
     uploads.set({ scanning: false });
   }

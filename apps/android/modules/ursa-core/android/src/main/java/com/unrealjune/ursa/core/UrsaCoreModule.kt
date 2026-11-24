@@ -72,6 +72,12 @@ class UrsaCoreModule : Module() {
 
     AsyncFunction("shutdown") Coroutine { -> call { core.shutdown() } }
 
+    Function("configureTelemetry") { endpoint: String, instanceId: String, version: String ->
+      core.configureTelemetry(endpoint, instanceId, version)
+    }
+
+    Function("flushTelemetry") { core.flushTelemetry() }
+
     AsyncFunction("status") Coroutine { -> call { core.status().toMap() } }
 
     AsyncFunction("refresh") Coroutine { -> call { core.refresh().toMap() } }

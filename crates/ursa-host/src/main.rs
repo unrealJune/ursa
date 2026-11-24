@@ -115,10 +115,13 @@ struct Host {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,iroh=warn,noq=warn".into()))
-        .init();
+    // stdout is the protocol, so log lines go to stderr. The app passes the collector and its
+    // telemetry id in the OTEL_* environment.
+    ursa_telemetry::init_console(
+        "info,iroh=warn,noq=warn",
+        true,
+        ursa_telemetry::Config::from_env("ursa-windows", "host", env!("CARGO_PKG_VERSION")),
+    );
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
@@ -157,7 +160,11 @@ async fn main() -> Result<()> {
                     }
                     v
                 }
-                Err(e) => json!({ "id": id, "ok": false, "error": format!("{e:#}") }),
+                Err(e) => {
+                    // The app shows it; this is what makes it visible in the collector too.
+                    tracing::warn!("command failed: {e:#}");
+                    json!({ "id": id, "ok": false, "error": format!("{e:#}") })
+                }
             });
         });
     }
@@ -166,6 +173,7 @@ async fn main() -> Result<()> {
     }
     drop(tx);
     let _ = writer.await;
+    ursa_telemetry::flush();
     Ok(())
 }
 
