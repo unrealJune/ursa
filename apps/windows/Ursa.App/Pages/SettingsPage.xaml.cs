@@ -53,10 +53,11 @@ public sealed partial class SettingsPage : Page
         try
         {
             string? linked = await Library.OfferLinkAsync(
-                code =>
+                async code =>
                 {
                     LinkCode.Text = code;
                     LinkPanel.Visibility = Visibility.Visible;
+                    LinkQr.Source = await Qr.ImageAsync(code);
                 },
                 async (name, platform, code) =>
                 {
@@ -90,6 +91,7 @@ public sealed partial class SettingsPage : Page
             CancelLinkButton.Visibility = Visibility.Collapsed;
             AddDeviceButton.IsEnabled = true;
             LinkCode.Text = "";
+            LinkQr.Source = null;
         }
     }
 
@@ -203,6 +205,37 @@ public sealed partial class SettingsPage : Page
     {
         try { Copy(await Library.InviteAsync()); }
         catch (Exception ex) { Library.Error = ex.Message; }
+    }
+
+    private async void OnShowInvite(object sender, RoutedEventArgs e)
+    {
+        string invite;
+        try { invite = await Library.InviteAsync(); }
+        catch (Exception ex) { Library.Error = ex.Message; return; }
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "Your invite",
+            Content = new StackPanel
+            {
+                Spacing = 12,
+                Children =
+                {
+                    new TextBlock { Text = "In Ursa on your friend's phone, open Friends and tap the scan button beside “Their invite”.", TextWrapping = TextWrapping.Wrap },
+                    new Border
+                    {
+                        Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.White),
+                        CornerRadius = new CornerRadius(8),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        Child = new Image { Source = await Qr.ImageAsync(invite), Width = 300, Height = 300 },
+                    },
+                },
+            },
+            PrimaryButtonText = "Copy",
+            CloseButtonText = "Done",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary) Copy(invite);
     }
 
     private async void OnBefriend(object sender, RoutedEventArgs e)
