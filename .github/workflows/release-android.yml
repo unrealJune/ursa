@@ -237,7 +237,15 @@ jobs:
         run: |
           # Only the ABIs the core was built for.
           archs="$(tr ' ' ',' <<<"$ABIS")"
-          ./gradlew :app:assembleRelease --no-daemon --build-cache -PreactNativeArchitectures="$archs"
+          # R8 was 5 of a warm pull-request build's 9 minutes, and nothing caches it. A pull
+          # request's APK is for a test phone, so it skips R8 and resource shrinking; anything
+          # built for a release (main, or a dispatch) still runs both, so the keep rules are
+          # exercised before an APK ships.
+          shrink=()
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            shrink=(-Pandroid.enableMinifyInReleaseBuilds=false -Pandroid.enableShrinkResourcesInReleaseBuilds=false)
+          fi
+          ./gradlew :app:assembleRelease --no-daemon --build-cache -PreactNativeArchitectures="$archs" "${shrink[@]}"
 
       # The hit rate is the point of the cache, so it goes in the log.
       - name: ccache statistics
