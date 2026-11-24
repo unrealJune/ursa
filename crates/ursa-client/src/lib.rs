@@ -137,7 +137,9 @@ impl Device {
     /// account's pkarr locator.
     pub async fn open(self: &Arc<Self>, root: AccountKey, device_name: &str, platform: &str) -> Result<Arc<Session>> {
         let session = Session::new(self.clone(), Account::from_root(root), device_name, platform);
-        if let Err(e) = session.load_head().await {
+        let loaded = session.load_head().await;
+        info!(ok = loaded.is_ok(), "open: head lookup finished");
+        if let Err(e) = loaded {
             // An account with no node yet lives only on the device that created it.
             match session.load_local() {
                 Some(state) => *session.head.lock().await = Some((None, state)),
@@ -146,6 +148,7 @@ impl Device {
         }
         // Make sure this device is listed (it is new on a recovery).
         if !session.state().await.devices.iter().any(|d| d.device == session.device.id()) {
+            info!("open: adding this device to the account");
             let entry = session.device_entry();
             session.update(move |s| s.devices.push(entry.clone())).await?;
         }
@@ -161,8 +164,10 @@ impl Device {
         on_confirmation: impl FnOnce(String),
     ) -> Result<(AccountKey, Arc<Session>)> {
         let (root, _cert) = ursa_proto::link::join(&self.endpoint, code, device_name, platform, on_confirmation).await?;
+        info!("join: the other device sent the account key");
         // The offering device knows where the account lives; it sent no head, so look it up.
         let session = self.open(root.clone(), device_name, platform).await?;
+        info!("join: done");
         Ok((root, session))
     }
 }
@@ -367,7 +372,13 @@ impl Session {
                 },
             };
             let Some(r) = next else { break };
-            let Ok(h) = r else { continue };
+            let h = match r {
+                Ok(h) => h,
+                Err(e) => {
+                    info!("head: {e:#}");
+                    continue;
+                }
+            };
             reached += 1;
             if let Some(h) = h
                 && h.verify()
@@ -431,6 +442,7 @@ impl Session {
                 *self.head.lock().await = Some((None, state.clone()));
                 return Ok(state);
             }
+            info!(nodes = targets.len(), seq, "head save: writing");
             let results = futures_util::future::join_all(targets.iter().map(|n| {
                 let head = head.clone();
                 async move {
