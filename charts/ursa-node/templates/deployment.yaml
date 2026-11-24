@@ -73,6 +73,10 @@ spec:
               value: {{ .Values.s3.bucket | quote }}
             - name: URSA_S3_REGION
               value: {{ .Values.s3.region | quote }}
+            {{- with .Values.s3.prefix }}
+            - name: URSA_S3_PREFIX
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.relayUrls }}
             - name: URSA_RELAY_URLS

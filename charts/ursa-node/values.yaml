@@ -18,6 +18,8 @@ s3:
   endpoint: ""
   bucket: ursa
   region: us-east-1
+  # A path inside the bucket for this node's keys, so several nodes can share one bucket.
+  prefix: ""
 
 # An existing Secret with the node's keys. The chart never creates one, so the identity stays
 # out of Helm history. Keys read:

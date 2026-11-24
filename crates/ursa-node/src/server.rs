@@ -1,13 +1,16 @@
-//! The node's side of `ursa/node/1`.
+//! The node's side of `ursa/node/2`.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
-use ursa_proto::{MAX_OBJECT, NodeInfo, Request, Response, read_body, read_header, write_header};
+use ursa_core::account::AccountId;
+use ursa_core::head::Head;
+use ursa_proto::{GrantInfo, MAX_OBJECT, NodeInfo, Request, Response, Role, read_body, read_header, write_header};
 
 use crate::store::Store;
 
@@ -18,9 +21,14 @@ pub struct Node {
 
 struct Inner {
     store: Store,
-    /// Endpoint ids (hex) allowed to use the node. Mirrors `node/owners.json` in the store.
-    owners: RwLock<Vec<String>>,
+    node_id: String,
     claim_code: String,
+    owners: RwLock<Vec<AccountId>>,
+    grants: RwLock<BTreeMap<AccountId, u64>>,
+    /// Bytes stored per account. Loaded from a listing at start, kept up to date after.
+    usage: Mutex<HashMap<AccountId, u64>>,
+    /// Serialises head compare-and-set.
+    heads: Mutex<()>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -30,64 +38,162 @@ impl std::fmt::Debug for Inner {
 }
 
 impl Node {
-    pub async fn new(store: Store, claim_code: String) -> Result<Self> {
+    pub async fn new(store: Store, node_id: String, claim_code: String) -> Result<Self> {
         let owners = store.owners().await?;
-        Ok(Self { inner: Arc::new(Inner { store, owners: RwLock::new(owners), claim_code }) })
+        let grants = store.grants().await?;
+        let usage = store.usage().await?;
+        info!(owners = owners.len(), grants = grants.len(), accounts_with_data = usage.len(), "store opened");
+        Ok(Self {
+            inner: Arc::new(Inner {
+                store,
+                node_id,
+                claim_code,
+                owners: RwLock::new(owners),
+                grants: RwLock::new(grants),
+                usage: Mutex::new(usage),
+                heads: Mutex::new(()),
+            }),
+        })
     }
 
     pub async fn claimed(&self) -> bool {
         !self.inner.owners.read().await.is_empty()
     }
 
-    async fn is_owner(&self, who: &str) -> bool {
-        self.inner.owners.read().await.iter().any(|o| o == who)
+    async fn role(&self, account: &AccountId) -> (Role, Option<u64>) {
+        if self.inner.owners.read().await.contains(account) {
+            return (Role::Owner, None);
+        }
+        match self.inner.grants.read().await.get(account) {
+            Some(q) => (Role::Granted, Some(*q)),
+            None => (Role::None, None),
+        }
     }
 
-    async fn handle(&self, who: &str, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
+    async fn info(&self, account: Option<&AccountId>) -> NodeInfo {
+        let (role, quota) = match account {
+            Some(a) => self.role(a).await,
+            None => (Role::None, None),
+        };
+        let usage = self.inner.usage.lock().await;
+        let used = account.and_then(|a| usage.get(a).copied()).unwrap_or(0);
+        let grants = if role == Role::Owner {
+            self.inner
+                .grants
+                .read()
+                .await
+                .iter()
+                .map(|(a, q)| GrantInfo { account: *a, quota_bytes: *q, used_bytes: usage.get(a).copied().unwrap_or(0) })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        NodeInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            backend: self.inner.store.kind().to_string(),
+            node_id: self.inner.node_id.clone(),
+            claimed: self.claimed().await,
+            role,
+            used_bytes: used,
+            quota_bytes: quota,
+            grants,
+        }
+    }
+
+    async fn handle(&self, who: &str, session: &Mutex<Option<AccountId>>, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
         let req: Request = read_header(recv).await?;
-        let owner = self.is_owner(who).await;
         let store = &self.inner.store;
+
+        // Requests that do not need an account.
+        match &req {
+            Request::Auth { cert } => {
+                let resp = if cert.verify_for(who) {
+                    *session.lock().await = Some(cert.account.id);
+                    debug!(%who, account = %cert.account.id.short(), "authenticated");
+                    Response::ok()
+                } else {
+                    warn!(%who, "a certificate that does not verify for this connection");
+                    Response::err("certificate does not verify for this device")
+                };
+                return reply(send, &resp).await;
+            }
+            Request::Info => {
+                let account = *session.lock().await;
+                return reply(send, &Response { info: Some(self.info(account.as_ref()).await), ..Response::ok() }).await;
+            }
+            _ => {}
+        }
+        let Some(account) = *session.lock().await else {
+            return reply(send, &Response::err("authenticate first")).await;
+        };
+        let (role, quota) = self.role(&account).await;
+
         let resp = match req {
-            Request::Info => Response {
-                info: Some(NodeInfo {
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    backend: store.kind().to_string(),
-                    claimed: self.claimed().await,
-                    owner,
-                }),
-                ..Response::ok()
-            },
+            Request::Auth { .. } | Request::Info => unreachable!(),
             Request::Claim { code } => {
                 if !constant_time_eq(code.as_bytes(), self.inner.claim_code.as_bytes()) {
                     warn!(%who, "claim with a wrong code");
                     Response::err("wrong claim code")
                 } else {
                     let mut owners = self.inner.owners.write().await;
-                    if !owners.iter().any(|o| o == who) {
+                    if !owners.contains(&account) {
                         let mut next = owners.clone();
-                        next.push(who.to_string());
+                        next.push(account);
                         store.set_owners(&next).await?;
                         *owners = next;
-                        info!(%who, "claimed: a new owner");
+                        info!(account = %account.short(), "claimed: a new owner");
                     }
                     Response::ok()
                 }
             }
-            _ if !owner => Response::err("not an owner of this node"),
+            Request::Grant { account: to, quota_bytes } => {
+                if role != Role::Owner {
+                    Response::err("only an owner can grant space")
+                } else {
+                    let mut grants = self.inner.grants.write().await;
+                    let mut next = grants.clone();
+                    next.insert(to, quota_bytes);
+                    store.set_grants(&next).await?;
+                    *grants = next;
+                    info!(to = %to.short(), quota_bytes, "granted");
+                    Response::ok()
+                }
+            }
+            Request::Revoke { account: from } => {
+                if role != Role::Owner {
+                    Response::err("only an owner can revoke space")
+                } else {
+                    let mut grants = self.inner.grants.write().await;
+                    let mut next = grants.clone();
+                    next.remove(&from);
+                    store.set_grants(&next).await?;
+                    *grants = next;
+                    Response::ok()
+                }
+            }
+            _ if role == Role::None => Response::err("this node has not granted your account any space"),
             Request::Put { id, len } => {
                 if len > MAX_OBJECT {
                     Response::err(format!("object of {len} bytes exceeds {MAX_OBJECT}"))
                 } else {
-                    let body = read_body(recv, len).await?;
-                    if !id.matches(&body) {
-                        Response::err(format!("bytes do not hash to {id}"))
+                    // Check the quota before reading the body, and again with the real size.
+                    let used = self.inner.usage.lock().await.get(&account).copied().unwrap_or(0);
+                    if quota.is_some_and(|q| used + len > q) {
+                        // Drain nothing: the client sees the refusal and the stream is reset.
+                        Response::err(format!("over quota: {used} + {len} > {} bytes", quota.unwrap()))
                     } else {
-                        store.put(&id, body).await?;
-                        Response::ok()
+                        let body = read_body(recv, len).await?;
+                        if !id.matches(&body) {
+                            Response::err(format!("bytes do not hash to {id}"))
+                        } else {
+                            let added = store.put(&account, &id, body).await?;
+                            *self.inner.usage.lock().await.entry(account).or_default() += added;
+                            Response::ok()
+                        }
                     }
                 }
             }
-            Request::Get { id } => match store.get(&id).await? {
+            Request::Get { id } => match store.get(&account, &id).await? {
                 Some(body) => {
                     write_header(send, &Response { len: Some(body.len() as u64), ..Response::ok() }).await?;
                     send.write_all(&body).await?;
@@ -99,34 +205,62 @@ impl Node {
             Request::Has { ids } => {
                 let mut have = Vec::with_capacity(ids.len());
                 for id in &ids {
-                    have.push(store.has(id).await?);
+                    have.push(store.has(&account, id).await?);
                 }
                 Response { have, ..Response::ok() }
             }
-            Request::IndexAdd { id } => {
-                if !store.has(&id).await? {
-                    Response::err(format!("manifest {id} is not stored"))
-                } else {
-                    store.index_add(&id).await?;
-                    Response::ok()
+            Request::Delete { ids } => {
+                let mut freed = 0;
+                for id in &ids {
+                    freed += store.delete(&account, id).await?;
                 }
-            }
-            Request::IndexRemove { id } => {
-                store.index_remove(&id).await?;
+                let mut usage = self.inner.usage.lock().await;
+                let u = usage.entry(account).or_default();
+                *u = u.saturating_sub(freed);
                 Response::ok()
             }
-            Request::IndexList => Response { ids: store.index_list().await?, ..Response::ok() },
+            Request::HeadGet => {
+                let head = match store.head(&account).await? {
+                    Some(b) => Some(Box::new(Head::from_json(&b).map_err(|e| anyhow!("stored head: {e}"))?)),
+                    None => None,
+                };
+                Response { head, ..Response::ok() }
+            }
+            Request::HeadPut { head, expected_seq } => {
+                if head.account.id != account || !head.verify() {
+                    Response::err("head is not signed by your account")
+                } else {
+                    let _guard = self.inner.heads.lock().await;
+                    let current = match store.head(&account).await? {
+                        Some(b) => Some(Head::from_json(&b).map_err(|e| anyhow!("stored head: {e}"))?),
+                        None => None,
+                    };
+                    let current_seq = current.as_ref().map(|h| h.seq);
+                    if current_seq != expected_seq || current_seq.is_some_and(|s| head.seq <= s) {
+                        Response { conflict: current.map(Box::new), error: Some("head changed".into()), ..Default::default() }
+                    } else {
+                        store.set_head(&account, head.to_json()).await?;
+                        debug!(account = %account.short(), seq = head.seq, "head stored");
+                        Response::ok()
+                    }
+                }
+            }
         };
-        write_header(send, &resp).await?;
-        send.finish()?;
-        Ok(())
+        reply(send, &resp).await
     }
+}
+
+async fn reply(send: &mut SendStream, resp: &Response) -> Result<()> {
+    write_header(send, resp).await?;
+    send.finish()?;
+    Ok(())
 }
 
 impl ProtocolHandler for Node {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let who = conn.remote_id().to_string();
         debug!(%who, "connection");
+        let session: Arc<Mutex<Option<AccountId>>> = Arc::new(Mutex::new(None));
         loop {
             let (mut send, mut recv) = match conn.accept_bi().await {
                 Ok(s) => s,
@@ -134,8 +268,9 @@ impl ProtocolHandler for Node {
             };
             let node = self.clone();
             let who = who.clone();
+            let session = session.clone();
             tokio::spawn(async move {
-                if let Err(e) = node.handle(&who, &mut send, &mut recv).await {
+                if let Err(e) = node.handle(&who, &session, &mut send, &mut recv).await {
                     debug!(%who, "request failed: {e:#}");
                     let _ = write_header(&mut send, &Response::err(format!("{e:#}"))).await;
                     let _ = send.finish();
@@ -162,7 +297,7 @@ pub fn check_claim_code(code: &str) -> Result<()> {
         bail!("a claim code must be at least 16 characters");
     }
     if code.contains('@') || code.contains(char::is_whitespace) {
-        return Err(anyhow!("a claim code cannot contain '@' or spaces"));
+        bail!("a claim code cannot contain '@' or spaces");
     }
     Ok(())
 }
