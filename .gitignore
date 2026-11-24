@@ -1,2 +1,6 @@
 target/
 *.json.out
+
+# .NET build output
+apps/windows/**/bin/
+apps/windows/**/obj/
