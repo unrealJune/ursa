@@ -141,9 +141,9 @@ jobs:
 
       # The built core: the library and its bindings, together (UniFFI aborts at load when the
       # two disagree, so neither is ever restored without the other). Keyed by everything the
-      # build reads, so a hit skips the Rust build entirely and a miss rebuilds from scratch. An
-      # arm64-only build also takes a release's core built from the same sources (its ABIs are a
-      # superset); a release never takes an arm64-only one.
+      # build reads, so a hit skips the Rust build entirely and a miss rebuilds from scratch. Exact
+      # keys only: an arm64-only build never takes a release's core or the other way round (Street
+      # Cryptid's previews failed repeatedly with that fallback, and never on a miss).
       - name: Restore the built core
         id: core
         uses: actions/cache/restore@v4
@@ -152,26 +152,25 @@ jobs:
             apps/android/modules/ursa-core/android/src/main/jniLibs
             apps/android/modules/ursa-core/android/src/main/java/uniffi
           key: ursa-core-${{ steps.rust.outputs.rustc }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh') }}-${{ env.ABIS }}
-          restore-keys: ${{ env.FAST == 'true' && format('ursa-core-{0}-{1}-', steps.rust.outputs.rustc, hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh')) || '' }}
-      - name: Is the core cached
-        id: have
-        env:
-          MATCHED: ${{ steps.core.outputs.cache-matched-key }}
-        run: echo "core=$([[ -n "$MATCHED" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Rust targets
-        if: steps.have.outputs.core != 'true'
+        if: steps.core.outputs.cache-hit != 'true'
         run: rustup target add aarch64-linux-android x86_64-linux-android
-      - uses: Swatinem/rust-cache@v2
-        if: steps.have.outputs.core != 'true'
+      - name: Restore the Cargo cache
+        id: cargo
+        uses: Swatinem/rust-cache@v2
+        if: steps.core.outputs.cache-hit != 'true'
         with:
-          key: android
+          shared-key: android
+          # rust-cache's post step only saves after a success by default, so a build that died
+          # after compiling for twenty minutes left the next one just as cold.
+          cache-on-failure: 'true'
       - uses: taiki-e/install-action@v2
-        if: steps.have.outputs.core != 'true'
+        if: steps.core.outputs.cache-hit != 'true'
         with:
           tool: cargo-ndk
       - name: Build the core and its Kotlin bindings
-        if: steps.have.outputs.core != 'true'
+        if: steps.core.outputs.cache-hit != 'true'
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           # shellcheck disable=SC2086
@@ -179,7 +178,7 @@ jobs:
       # Saved at once, not at the end of the job: a build that dies later (it has, twice) would
       # otherwise leave nothing behind, and the next one would build the core again.
       - name: Save the built core
-        if: steps.have.outputs.core != 'true'
+        if: steps.core.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -188,6 +187,15 @@ jobs:
           key: ${{ steps.core.outputs.cache-primary-key }}
 
       - uses: oven-sh/setup-bun@v2
+      # Bun's download cache: without it every run fetched all ~780 packages again. Saved when the
+      # lockfile changes (an exact hit skips the save), restored from the newest one otherwise.
+      - name: Bun download cache
+        id: bun
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ursa-bun-${{ runner.os }}-${{ hashFiles('apps/android/bun.lock') }}
+          restore-keys: ursa-bun-${{ runner.os }}-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -231,6 +239,29 @@ jobs:
             ursa-ccache-${{ hashFiles('apps/android/bun.lock') }}-
             ursa-ccache-
       - run: ccache --zero-stats > /dev/null
+
+      # Metro's transform cache, for the JS bundle Gradle builds (createBundleReleaseJsAndAssets).
+      # Expo's Metro config has a build-runner mode: with both directories set it reads entries
+      # from RESTORE and writes every entry this bundle used, hits included, to OUTPUT, so the saved
+      # entry is exactly this build's working set and never grows. Metro keys each transform by
+      # file content and transformer config, so a stale entry is a miss, never a wrong transform.
+      # The second hash is the JS itself: a native-only push is an exact hit and saves nothing.
+      - name: Point Metro at its cache directories
+        run: |
+          mkdir -p "$RUNNER_TEMP/metro-cache" "$RUNNER_TEMP/metro-cache-output"
+          {
+            echo "EXPO_METRO_CACHE_RESTORE_DIR=$RUNNER_TEMP/metro-cache"
+            echo "EXPO_METRO_CACHE_OUTPUT_DIR=$RUNNER_TEMP/metro-cache-output"
+          } >> "$GITHUB_ENV"
+      - name: Restore the Metro cache
+        id: metro
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ursa-metro-${{ hashFiles('apps/android/bun.lock', 'apps/android/app.json', 'apps/android/app.config.ts', 'apps/android/babel.config.js', 'apps/android/metro.config.js') }}-${{ hashFiles('apps/android/src/**', 'apps/android/assets/**', 'apps/android/modules/*/index.ts') }}
+          restore-keys: |
+            ursa-metro-${{ hashFiles('apps/android/bun.lock', 'apps/android/app.json', 'apps/android/app.config.ts', 'apps/android/babel.config.js', 'apps/android/metro.config.js') }}-
+            ursa-metro-
 
       - name: Install and check the app
         working-directory: apps/android
@@ -285,6 +316,52 @@ jobs:
         with:
           path: ~/.cache/ccache
           key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+      # actions/cache folds the path into an entry's identity, so the output moves to the path the
+      # restore reads from before it is saved.
+      - name: Stage the Metro cache
+        if: ${{ !cancelled() && steps.metro.outputs.cache-hit != 'true' }}
+        run: |
+          out="$RUNNER_TEMP/metro-cache-output"
+          [[ -d "$out" && -n "$(ls -A "$out")" ]] || { echo "Metro wrote nothing to save."; exit 0; }
+          echo "Metro: restored $(find "$RUNNER_TEMP/metro-cache" -type f | wc -l) entries, this bundle used $(find "$out" -type f | wc -l)."
+          rm -rf -- "$RUNNER_TEMP/metro-cache"
+          mv -- "$out" "$RUNNER_TEMP/metro-cache"
+      - name: Save the Metro cache
+        if: ${{ !cancelled() && steps.metro.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ${{ steps.metro.outputs.cache-primary-key }}
+
+      # A build that took longer than it should is almost always one whose caches missed, so the
+      # summary says which did. "partial" is a restore from an older entry (a fallback key).
+      - name: Cache report
+        if: '!cancelled()'
+        env:
+          CORE: ${{ steps.core.outputs.cache-hit }}
+          CARGO: ${{ steps.core.outputs.cache-hit == 'true' && 'skipped (core cached)' || steps.cargo.outputs.cache-hit }}
+          BUN: ${{ steps.bun.outputs.cache-hit }}
+          METRO: ${{ steps.metro.outputs.cache-hit }}
+          METRO_MATCH: ${{ steps.metro.outputs.cache-matched-key }}
+          CCACHE_MATCH: ${{ steps.ccache.outputs.cache-matched-key }}
+        run: |
+          state() { if [[ "$1" == true ]]; then echo hit; elif [[ -n "$2" ]]; then echo partial; else echo miss; fi; }
+          {
+            echo "### Caches"
+            echo
+            echo "| Cache | Result |"
+            echo "| --- | --- |"
+            echo "| Built core (skips Rust) | $([[ "$CORE" == true ]] && echo hit || echo miss) |"
+            echo "| Cargo | ${CARGO:-miss} |"
+            echo "| Bun downloads | $([[ "$BUN" == true ]] && echo hit || echo "miss or older entry") |"
+            echo "| Metro transforms | $(state "$METRO" "$METRO_MATCH") |"
+            echo "| ccache | $([[ -n "$CCACHE_MATCH" ]] && echo "restored from ${CCACHE_MATCH##*-}" || echo miss) |"
+            echo
+            echo '```'
+            ccache --show-stats 2>/dev/null | grep -E 'Hits|Misses|Cacheable' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check the core shipped
         run: |
