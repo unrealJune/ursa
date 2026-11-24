@@ -28,6 +28,7 @@ mod logcat;
 // Types the app sees
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
 pub enum UrsaError {
     #[error("{message}")]
     Failed { message: String },
