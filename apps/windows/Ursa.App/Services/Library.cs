@@ -104,9 +104,11 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         await StartAsync();
     }
 
-    public async Task RefreshAccountAsync()
+    /// <param name="fromNodes">Re-read the account from its nodes first, for what other devices
+    /// changed (a phone that joined, photos it uploaded); otherwise what this device last read.</param>
+    public async Task RefreshAccountAsync(bool fromNodes = false)
     {
-        var s = await host.CallAsync("status");
+        var s = await host.CallAsync(fromNodes && HasAccount ? "refresh" : "status");
         HasAccount = s.GetProperty("has_account").GetBoolean();
         if (!HasAccount)
         {
@@ -147,10 +149,10 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         else { StatusText = "Offline"; DetailText = "None of your nodes answered"; }
     }
 
-    /// <summary>Account, then pool.</summary>
+    /// <summary>Account (re-read from its nodes), then pool: the refresh a person asks for.</summary>
     public async Task RefreshStatusAsync()
     {
-        await RefreshAccountAsync();
+        await RefreshAccountAsync(fromNodes: true);
         if (HasAccount) await RefreshPoolAsync();
     }
 
@@ -242,15 +244,23 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         {
             var r = await host.CallAsync("list");
             var fresh = r.GetProperty("items").EnumerateArray().Select(GalleryItem.FromJson).ToList();
-            var known = Items.ToDictionary(i => i.FileId);
-            Items.Clear();
-            foreach (var item in fresh)
+            // Brought in line item by item, never cleared and refilled: a reset of the whole
+            // collection under the justified rows (LinedFlowLayout) is the suspect in a crash that
+            // ended the app when a phone's uploads arrived. Items already shown keep their object,
+            // and with it their thumbnail and selection.
+            var added = new List<GalleryItem>();
+            for (int i = 0; i < fresh.Count; i++)
             {
-                // Keep a thumbnail already loaded.
-                if (known.TryGetValue(item.FileId, out var old) && old.Thumbnail is not null) item.Thumbnail = old.Thumbnail;
-                Items.Add(item);
+                string id = fresh[i].FileId;
+                int at = -1;
+                for (int j = i; j < Items.Count; j++)
+                    if (Items[j].FileId == id) { at = j; break; }
+                if (at == i) continue;
+                if (at > i) Items.Move(at, i);
+                else { Items.Insert(i, fresh[i]); added.Add(fresh[i]); }
             }
-            _ = LoadThumbnailsAsync(fresh.Where(i => i.HasThumb && i.Thumbnail is null).ToList());
+            while (Items.Count > fresh.Count) Items.RemoveAt(Items.Count - 1);
+            _ = LoadThumbnailsAsync(added.Where(i => i.HasThumb).Concat(Items.Where(i => i.HasThumb && i.Thumbnail is null)).Distinct().ToList());
             Error = null;
         }
         finally

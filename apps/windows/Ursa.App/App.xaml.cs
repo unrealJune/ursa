@@ -9,7 +9,15 @@ public partial class App : Application
     public static HostClient Host { get; } = new();
     public static Library Library { get; } = new(Host);
 
-    public App() => InitializeComponent();
+    public App()
+    {
+        InitializeComponent();
+        // A crash otherwise leaves only "0xc0000409 in ntdll" in the event log. This records the
+        // managed exception behind it; a failure inside WinUI's native code still goes unrecorded.
+        UnhandledException += (_, e) => CrashLog.Write("UI thread", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => CrashLog.Write("thread", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) => CrashLog.Write("unobserved task", e.Exception);
+    }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {

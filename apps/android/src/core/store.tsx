@@ -42,7 +42,7 @@ type Ctx = {
   backupScanning: boolean;
   retry(): Promise<void>;
   refreshStatus(): Promise<void>;
-  refreshLibrary(): Promise<void>;
+  refreshLibrary(fromNodes?: unknown): Promise<void>;
   adopt(keys: AccountKeys): Promise<void>;
   signOut(): Promise<void>;
   setNetwork(relays: string[], token: string | null): Promise<void>;
@@ -127,9 +127,11 @@ export function UrsaProvider({ children }: { children: ReactNode }) {
     setStatus(await Ursa.status());
   }, []);
 
-  const refreshLibrary = useCallback(async () => {
+  /** Lists the library; a refresh the person asked for first re-reads the account from its nodes. */
+  const refreshLibrary = useCallback(async (fromNodes: unknown = true) => {
     setLibLoading(true);
     try {
+      if (fromNodes !== false) setStatus(await Ursa.refresh());
       const list = await Ursa.list();
       list.sort((a, b) => b.createdMs - a.createdMs);
       setItems(list);
@@ -142,7 +144,8 @@ export function UrsaProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (phase === 'ready') refreshLibrary();
+    // Opening the account has just read it from the nodes.
+    if (phase === 'ready') refreshLibrary(false);
   }, [phase, refreshLibrary]);
 
   const adopt = useCallback(

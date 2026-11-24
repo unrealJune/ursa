@@ -64,6 +64,8 @@ declare class UrsaCoreModule extends NativeModule<Events> {
   /** Stops the endpoint, to `init` again with other relays. */
   shutdown(): Promise<void>;
   status(): Promise<Status>;
+  /** Re-reads the account from its nodes (what other devices changed), then the status. */
+  refresh(): Promise<Status>;
   createAccount(name: string): Promise<AccountKeys>;
   recoverPhrase(phrase: string): Promise<AccountKeys>;
   /** `uri`: the key file, from the document picker. */
