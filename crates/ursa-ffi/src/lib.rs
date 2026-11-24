@@ -359,7 +359,11 @@ impl UrsaCore {
     ) -> Res<Status> {
         let inner = self.inner.clone();
         on_rt(async move {
-            let device = match inner.device.lock().await.clone() {
+            // Not `match inner.device.lock().await.clone()`: a scrutinee's temporaries live to
+            // the end of the match, so the guard would still be held when `None` stores the
+            // device, and the second lock would wait on the first forever.
+            let started = inner.device.lock().await.clone();
+            let device = match started {
                 Some(d) => d,
                 None => {
                     let d = Device::start(
