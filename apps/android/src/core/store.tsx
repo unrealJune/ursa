@@ -151,10 +151,18 @@ export function UrsaProvider({ children }: { children: ReactNode }) {
   const adopt = useCallback(
     async (keys: AccountKeys) => {
       await accountKey.set(keys.accountKey);
+      // A link hands over the other device's relays and token, and the core already runs on
+      // them: keep them for the next start (and for the Network screen).
+      if (keys.relays) {
+        const next = { ...prefs, relays: keys.relays };
+        setPrefsState(next);
+        await savePrefs(next);
+        await relayToken.set(keys.relayToken ?? null);
+      }
       setHadKey(true);
       await refreshStatus();
     },
-    [refreshStatus],
+    [prefs, refreshStatus],
   );
 
   const signOut = useCallback(async () => {

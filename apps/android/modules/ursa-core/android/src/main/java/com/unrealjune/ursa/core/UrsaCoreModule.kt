@@ -223,7 +223,8 @@ class UrsaCoreModule : Module() {
   }
 }
 
-private fun AccountKeys.toMap() = mapOf("accountId" to accountId, "accountKey" to accountKey)
+private fun AccountKeys.toMap() =
+  mapOf("accountId" to accountId, "accountKey" to accountKey, "relays" to relays, "relayToken" to relayToken)
 
 private fun Status.toMap() =
   mapOf(

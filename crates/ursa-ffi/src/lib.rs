@@ -49,6 +49,10 @@ type Res<T> = Result<T, UrsaError>;
 pub struct AccountKeys {
     pub account_id: String,
     pub account_key: String,
+    /// After a link: the other device's relays, which the core now runs on. The app keeps
+    /// them (with `relay_token`) for its next start. None after anything else.
+    pub relays: Option<Vec<String>>,
+    pub relay_token: Option<String>,
 }
 
 #[derive(uniffi::Record)]
@@ -267,6 +271,8 @@ impl Inner {
         let keys = AccountKeys {
             account_id: s.account_id().to_string(),
             account_key: hex_root(s.account.root()),
+            relays: None,
+            relay_token: None,
         };
         *self.session.lock().await = Some(s);
         keys
@@ -458,10 +464,17 @@ impl UrsaCore {
         on_rt(async move {
             let (dn, pf) = inner.names.lock().await.clone();
             let device = inner.device().await?;
-            let (_, s) = device
+            let linked = device
                 .join(&code, &dn, &pf, move |c| listener.on_confirm(c))
                 .await?;
-            Ok(inner.adopt(s).await)
+            // Joining may have restarted the device on the other device's relays.
+            *inner.device.lock().await = Some(linked.session.device.clone());
+            let mut keys = inner.adopt(linked.session).await;
+            if let Some(n) = linked.network {
+                keys.relays = Some(n.relays);
+                keys.relay_token = n.relay_token;
+            }
+            Ok(keys)
         })
         .await
     }

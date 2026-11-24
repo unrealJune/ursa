@@ -25,7 +25,7 @@ use tracing::{info, warn};
 use ursa_core::account::{Account, AccountId, DeviceCert};
 use ursa_core::crypto::AccountKey;
 use ursa_core::head::{AccountState, DeviceEntry, Friend, Head, NodeRef};
-use ursa_proto::link::{LinkCode, LinkHandler};
+use ursa_proto::link::{LinkCode, LinkHandler, LinkNetwork};
 use ursa_proto::{ClaimLink, HeadPut, NodeClient, NodeInfo, Role, parse_addr, ticket_of};
 
 pub use library::{Item, UploadMeta};
@@ -51,6 +51,20 @@ pub struct NetConfig {
     pub pkarr: Vec<String>,
 }
 
+impl NetConfig {
+    /// Whether two configs bind the same relays with the same token (blank lines and a blank
+    /// token count as none, as [`Device::start`] reads them).
+    pub fn same_relays(&self, other: &NetConfig) -> bool {
+        fn relays(c: &NetConfig) -> Vec<&str> {
+            c.relays.iter().map(|r| r.trim()).filter(|r| !r.is_empty()).collect()
+        }
+        fn token(c: &NetConfig) -> Option<&str> {
+            c.relay_token.as_deref().map(str::trim).filter(|t| !t.is_empty())
+        }
+        relays(self) == relays(other) && token(self) == token(other)
+    }
+}
+
 /// This machine, before or without an account.
 pub struct Device {
     data_dir: PathBuf,
@@ -58,6 +72,20 @@ pub struct Device {
     router: Router,
     link: LinkHandler,
     pkarr: Vec<url::Url>,
+    /// What it was started with: handed to a device it links, and compared with what a device
+    /// it joins through sends.
+    net: NetConfig,
+}
+
+/// A device that has joined an account through a link code.
+pub struct Linked {
+    pub root: AccountKey,
+    /// Opened on the device that joined, or on its replacement when the offering device's
+    /// network settings differed (`session.device`: callers keep that one from now on).
+    pub session: Arc<Session>,
+    /// The offering device's network settings, which the session now runs on; the caller
+    /// should keep them for the next start. None when the other device sent none.
+    pub network: Option<NetConfig>,
 }
 
 impl Device {
@@ -99,7 +127,7 @@ impl Device {
         } else {
             net.pkarr.iter().map(|u| u.parse().map_err(|e| anyhow!("bad pkarr relay {u}: {e}"))).collect::<Result<_>>()?
         };
-        Ok(Arc::new(Self { data_dir: data_dir.to_path_buf(), endpoint, router, link, pkarr }))
+        Ok(Arc::new(Self { data_dir: data_dir.to_path_buf(), endpoint, router, link, pkarr, net: net.clone() }))
     }
 
     pub fn id(&self) -> String {
@@ -162,13 +190,26 @@ impl Device {
         device_name: &str,
         platform: &str,
         on_confirmation: impl FnOnce(String),
-    ) -> Result<(AccountKey, Arc<Session>)> {
-        let (root, _cert) = ursa_proto::link::join(&self.endpoint, code, device_name, platform, on_confirmation).await?;
-        info!("join: the other device sent the account key");
+    ) -> Result<Linked> {
+        let joined = ursa_proto::link::join(&self.endpoint, code, device_name, platform, on_confirmation).await?;
+        info!(network = joined.network.is_some(), "join: the other device sent the account key");
+        let network = joined.network.map(|n| NetConfig { relays: n.relays, relay_token: n.relay_token, pkarr: self.net.pkarr.clone() });
+        // The account's nodes are reached through the account's relays, and an endpoint's relays
+        // are fixed when it binds: a device started without them (a phone fresh from install has
+        // no relay token) must restart on them before it can find the account. Same device key,
+        // so the same identity.
+        let device = match &network {
+            Some(n) if !self.net.same_relays(n) => {
+                info!(relays = n.relays.len(), "join: restarting on the other device's relays");
+                self.shutdown().await;
+                Device::start(&self.data_dir, n).await?
+            }
+            _ => self.clone(),
+        };
         // The offering device knows where the account lives; it sent no head, so look it up.
-        let session = self.open(root.clone(), device_name, platform).await?;
+        let session = device.open(joined.root.clone(), device_name, platform).await?;
         info!("join: done");
-        Ok((root, session))
+        Ok(Linked { root: joined.root, session, network })
     }
 }
 
@@ -631,7 +672,9 @@ impl Session {
     /// Offers a link code for a new device. Each join attempt arrives on the receiver with the
     /// confirmation code to show and a sender for the person's yes or no.
     pub async fn offer_link(&self) -> (LinkCode, tokio::sync::mpsc::Receiver<(ursa_proto::link::Joiner, String, ursa_proto::link::Decision)>) {
-        self.device.link.offer(&self.device.endpoint, self.account.clone(), now_ms()).await
+        let net = &self.device.net;
+        let network = LinkNetwork { relays: net.relays.clone(), relay_token: net.relay_token.clone() };
+        self.device.link.offer(&self.device.endpoint, self.account.clone(), Some(network), now_ms()).await
     }
 
     pub async fn cancel_link(&self) {

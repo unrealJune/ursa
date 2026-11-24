@@ -9,6 +9,10 @@
 //!    the person checks they match and confirms on the offering device.
 //! 4. The offering device seals the account root to the joiner's X-Wing key (post-quantum, unlike
 //!    iroh's TLS) and signs a certificate for the joiner's endpoint id.
+//! 5. With the root it sends its network settings (relay URLs and the relay token), sealed the
+//!    same way under their own transcript: a device that cannot use the account's relays cannot
+//!    reach the account's nodes, and the token is a secret. Optional on the wire, so either side
+//!    may be older.
 //!
 //! The QUIC connection already authenticates the offering device (its id is in the ticket); the
 //! secret authenticates the joiner; the confirmation code catches a leaked link code.
@@ -68,8 +72,31 @@ struct Hello {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 enum Reply {
-    Accepted { sealed_root: String, cert: Box<DeviceCert> },
+    Accepted {
+        sealed_root: String,
+        cert: Box<DeviceCert>,
+        /// [`LinkNetwork`] as JSON, sealed like the root under its own transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_network: Option<String>,
+    },
     Rejected { reason: String },
+}
+
+/// The offering device's network settings, handed to the device that joins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkNetwork {
+    /// iroh relays; empty means n0's public ones.
+    pub relays: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_token: Option<String>,
+}
+
+/// What joining an account yields.
+pub struct Joined {
+    pub root: AccountKey,
+    pub cert: DeviceCert,
+    /// The offering device's network settings, when it sent them.
+    pub network: Option<LinkNetwork>,
 }
 
 /// Who is asking to join, shown with the confirmation code.
@@ -99,7 +126,15 @@ fn confirmation(secret: &[u8; 32], offerer: &str, joiner: &str, xwing: &[u8]) ->
 }
 
 fn transcript(offerer: &str, joiner: &str, xwing: &[u8]) -> Vec<u8> {
-    let mut t = b"ursa link root v1\0".to_vec();
+    transcript_for(b"ursa link root v1\0", offerer, joiner, xwing)
+}
+
+fn network_transcript(offerer: &str, joiner: &str, xwing: &[u8]) -> Vec<u8> {
+    transcript_for(b"ursa link network v1\0", offerer, joiner, xwing)
+}
+
+fn transcript_for(label: &[u8], offerer: &str, joiner: &str, xwing: &[u8]) -> Vec<u8> {
+    let mut t = label.to_vec();
     t.extend_from_slice(offerer.as_bytes());
     t.extend_from_slice(joiner.as_bytes());
     t.extend_from_slice(blake3::hash(xwing).as_bytes());
@@ -115,6 +150,7 @@ pub type Decision = oneshot::Sender<bool>;
 struct Offer {
     code: LinkCode,
     account: Arc<Account>,
+    network: Option<LinkNetwork>,
     now_ms: i64,
     /// Told who is joining and the code to show; answers with the person's decision.
     prompt: tokio::sync::mpsc::Sender<(Joiner, String, Decision)>,
@@ -139,11 +175,12 @@ impl LinkHandler {
         &self,
         endpoint: &Endpoint,
         account: Arc<Account>,
+        network: Option<LinkNetwork>,
         now_ms: i64,
     ) -> (LinkCode, tokio::sync::mpsc::Receiver<(Joiner, String, Decision)>) {
         let code = LinkCode::new(endpoint.addr());
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        *self.offer.lock().await = Some(Offer { code: code.clone(), account, now_ms, prompt: tx });
+        *self.offer.lock().await = Some(Offer { code: code.clone(), account, network, now_ms, prompt: tx });
         (code, rx)
     }
 
@@ -155,14 +192,14 @@ impl LinkHandler {
         let joiner = conn.remote_id().to_string();
         let (mut send, mut recv) = conn.accept_bi().await?;
         let hello: Hello = read_header(&mut recv).await?;
-        let (code, account, now_ms, prompt) = {
+        let (code, account, network, now_ms, prompt) = {
             let guard = self.offer.lock().await;
             let Some(o) = guard.as_ref() else {
                 write_header(&mut send, &Reply::Rejected { reason: "no link offer is open on that device".into() }).await?;
                 send.finish()?;
                 return Ok(());
             };
-            (o.code.clone(), o.account.clone(), o.now_ms, o.prompt.clone())
+            (o.code.clone(), o.account.clone(), o.network.clone(), o.now_ms, o.prompt.clone())
         };
         // This device's own id, as the joiner saw it in the ticket.
         let offerer = code.addr.id.to_string();
@@ -182,7 +219,15 @@ impl LinkHandler {
             *self.offer.lock().await = None;
             let sealed = seal_to(&xwing, account.root().as_bytes(), &transcript(&offerer, &joiner, &xwing)).map_err(|e| anyhow!("{e}"))?;
             let cert = DeviceCert::issue(&account, &joiner, &hello.name, &hello.platform, now_ms);
-            Reply::Accepted { sealed_root: base64_encode(&sealed), cert: Box::new(cert) }
+            let sealed_network = match &network {
+                Some(n) => {
+                    let json = serde_json::to_vec(n)?;
+                    let sealed = seal_to(&xwing, &json, &network_transcript(&offerer, &joiner, &xwing)).map_err(|e| anyhow!("{e}"))?;
+                    Some(base64_encode(&sealed))
+                }
+                None => None,
+            };
+            Reply::Accepted { sealed_root: base64_encode(&sealed), cert: Box::new(cert), sealed_network }
         } else {
             Reply::Rejected { reason: "not confirmed on the other device".into() }
         };
@@ -207,15 +252,15 @@ impl ProtocolHandler for LinkHandler {
 // Joining side
 
 /// Joins the account behind `code`. `on_confirmation` is called with the 6-digit code to show
-/// while the person confirms on the other device. Returns the account root and this device's
-/// certificate.
+/// while the person confirms on the other device. Returns the account root, this device's
+/// certificate and the other device's network settings.
 pub async fn join(
     endpoint: &Endpoint,
     code: &str,
     name: &str,
     platform: &str,
     on_confirmation: impl FnOnce(String),
-) -> Result<(AccountKey, DeviceCert)> {
+) -> Result<Joined> {
     let code = LinkCode::parse(code)?;
     let me = endpoint.id().to_string();
     let offerer = code.addr.id.to_string();
@@ -237,7 +282,7 @@ pub async fn join(
     conn.close(0u32.into(), b"done");
     match reply {
         Reply::Rejected { reason } => bail!("{reason}"),
-        Reply::Accepted { sealed_root, cert } => {
+        Reply::Accepted { sealed_root, cert, sealed_network } => {
             let root = open_sealed(&seed, &base64_decode(&sealed_root)?, &transcript(&offerer, &me, &xwing))
                 .map_err(|e| anyhow!("could not open the account key: {e}"))?;
             let root: [u8; 32] = root.as_slice().try_into().map_err(|_| anyhow!("account key has the wrong length"))?;
@@ -246,7 +291,17 @@ pub async fn join(
             if cert.account.id != account.id() || !cert.verify_for(&me) {
                 bail!("the other device sent a certificate that does not match its account");
             }
-            Ok((root, *cert))
+            // Settings that do not open fail the join: the link worked, but a device that cannot
+            // use the account's relays may not reach the account at all.
+            let network = match sealed_network {
+                Some(b) => {
+                    let json = open_sealed(&seed, &base64_decode(&b)?, &network_transcript(&offerer, &me, &xwing))
+                        .map_err(|e| anyhow!("could not open the network settings: {e}"))?;
+                    Some(serde_json::from_slice(&json).context("the network settings are malformed")?)
+                }
+                None => None,
+            };
+            Ok(Joined { root, cert: *cert, network })
         }
     }
 }

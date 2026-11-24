@@ -159,6 +159,15 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
     private async Task AdoptAccountAsync(JsonElement r)
     {
         LocalStore.SaveAccountKey(r.GetProperty("account_key").GetString()!);
+        // A link hands over the other device's relays and token, and the host already runs on
+        // them: keep them for the next start (and for Settings › Relays).
+        if (r.TryGetProperty("relays", out var relays) && relays.ValueKind == JsonValueKind.Array)
+        {
+            var settings = LocalStore.LoadSettings();
+            settings.Relays = [.. relays.EnumerateArray().Select(u => u.GetString() ?? "").Where(u => u.Length > 0)];
+            settings.RelayToken = r.TryGetProperty("relay_token", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
+            LocalStore.SaveSettings(settings);
+        }
         OpenError = null;
         await RefreshAccountAsync();
         await RefreshPoolAsync();
