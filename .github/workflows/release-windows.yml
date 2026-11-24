@@ -1,0 +1,146 @@
+name: Release / Windows app
+
+# Builds the Ursa Windows app (WinUI 3 + the Rust ursa-host beside it) for x64 and ARM64 and
+# packages it with Velopack (install/uninstall; updates are off for now, so no feed is
+# published). A push to main that touches the app or the core cuts `windows-vX.Y.Z` when its
+# Conventional Commits ship something (scripts/next-version.sh windows), and attaches the
+# installers to that GitHub release. Other builds keep the installers as workflow artifacts.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/windows/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/**
+      - scripts/next-version.sh
+      - .github/workflows/release-windows.yml
+  pull_request:
+    paths:
+      - apps/windows/**
+      - crates/ursa-host/**
+      - crates/ursa-core/**
+      - crates/ursa-proto/**
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release to cut. `auto` follows the Conventional Commits since the last windows tag.
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      release: ${{ steps.ver.outputs.release }}
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: ver
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          set -euo pipefail
+          out="$(bash scripts/next-version.sh windows --force "$BUMP")"
+          echo "$out"
+          release="$(sed -n 's/^release=//p' <<<"$out")"
+          version="$(sed -n 's/^version=//p' <<<"$out")"
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then release=false; fi
+          # Builds that are not releases still need a version Velopack accepts.
+          if [[ "$release" != "true" ]]; then version="${version}-ci.${GITHUB_RUN_NUMBER}"; fi
+          {
+            echo "release=${release}"
+            echo "version=${version}"
+            echo "tag=$(sed -n 's/^tag=//p' <<<"$out")"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025, arch: x64, rid: win-x64, platform: x64 }
+          - { os: windows-11-arm, arch: arm64, rid: win-arm64, platform: ARM64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        shell: bash
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.arch }}
+      - name: Build ursa-host
+        run: cargo build --release --locked -p ursa-host
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: apps/windows/global.json
+      - name: Publish the app
+        working-directory: apps/windows/Ursa.App
+        run: >
+          dotnet publish -c Release -r ${{ matrix.rid }} -p:Platform=${{ matrix.platform }}
+          -p:Version=${{ env.VERSION }} -o ${{ runner.temp }}/publish
+      - name: Check the host shipped
+        shell: bash
+        run: test -f "${RUNNER_TEMP}/publish/ursa-host.exe"
+      - name: Package with Velopack
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install -g vpk
+          vpk pack --packId Ursa --packVersion "$VERSION" --packDir "$RUNNER_TEMP/publish" \
+            --mainExe Ursa.exe --packTitle Ursa --icon apps/windows/Ursa.App/Assets/ursa.ico \
+            --channel win-${{ matrix.arch }} --outputDir "$RUNNER_TEMP/releases"
+          ls -la "$RUNNER_TEMP/releases"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ursa-windows-${{ matrix.arch }}
+          path: ${{ runner.temp }}/releases
+
+  release:
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p upload
+          for arch in x64 arm64; do
+            for f in dist/ursa-windows-$arch/*; do
+              name="$(basename "$f")"
+              case "$name" in
+                *Setup.exe) cp "$f" "upload/Ursa-${VERSION}-${arch}-Setup.exe" ;;
+                *Portable.zip) cp "$f" "upload/Ursa-${VERSION}-${arch}-Portable.zip" ;;
+              esac
+            done
+          done
+          ls -la upload
+          gh release create "$TAG" upload/* --target "$GITHUB_SHA" --title "Ursa for Windows ${VERSION}" \
+            --notes "Unsigned preview. Installers for x64 and ARM64; updates are not automatic yet."
