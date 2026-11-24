@@ -1,0 +1,397 @@
+//! The library: upload, list, download, delete, repair. Every object goes through the pool as a
+//! coded [`ShardSet`]; the library index (which manifests exist, and where they are) is itself a
+//! coded object the account head points at.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow, bail};
+use futures_util::{StreamExt, TryStreamExt, stream};
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tracing::{info, warn};
+use ursa_core::ObjectId;
+use ursa_core::chunk;
+use ursa_core::crypto::{open_chunk, seal_chunk};
+use ursa_core::head::{IndexEntry, LibraryIndex};
+use ursa_core::manifest::{self, ChunkRef, FileManifest, ShardSet, StoredRef};
+
+use crate::objects::code_for;
+use crate::{Session, now_ms};
+
+/// Chunks in flight per upload or download.
+const IN_FLIGHT: usize = 4;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UploadMeta {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub mime: Option<String>,
+    #[serde(default)]
+    pub created_ms: Option<i64>,
+    #[serde(default)]
+    pub modified_ms: Option<i64>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub thumb_path: Option<PathBuf>,
+}
+
+/// A file in the library, as a list shows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Item {
+    pub file_id: String,
+    pub name: String,
+    pub size: u64,
+    pub mime: String,
+    pub created_ms: i64,
+    pub modified_ms: i64,
+    pub added_ms: i64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub has_thumb: bool,
+}
+
+impl Item {
+    fn of(id: &ObjectId, m: &FileManifest) -> Self {
+        Self {
+            file_id: id.to_hex(),
+            name: m.name.clone(),
+            size: m.size,
+            mime: m.mime.clone(),
+            created_ms: m.created_ms,
+            modified_ms: m.modified_ms,
+            added_ms: m.added_ms,
+            width: m.width,
+            height: m.height,
+            has_thumb: m.thumb.is_some(),
+        }
+    }
+}
+
+/// What repair did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RepairReport {
+    pub files: usize,
+    pub objects_checked: usize,
+    pub objects_rebuilt: usize,
+    pub unrecoverable: Vec<String>,
+}
+
+impl Session {
+    // -----------------------------------------------------------------------------------------
+    // The index
+
+    pub(crate) async fn index(&self) -> Result<LibraryIndex> {
+        let Some(r) = self.state().await.index else { return Ok(LibraryIndex::default()) };
+        let sealed = self.cached_or_fetch(&r.id, &r.shards).await?;
+        LibraryIndex::open(&self.account, &r.id, &sealed).map_err(|e| anyhow!("library index: {e}"))
+    }
+
+    /// Applies `change` to the index and saves it, merging with concurrent changes: if the head
+    /// moved under us, the change is re-applied to the newer index.
+    async fn change_index(&self, change: impl Fn(&mut LibraryIndex)) -> Result<()> {
+        for _ in 0..5 {
+            let before = self.state().await.index.as_ref().map(|r| r.id);
+            let mut idx = self.index().await?;
+            change(&mut idx);
+            let (id, sealed) = idx.seal(&self.account);
+            let writable = self.writable().await;
+            let set = self.store_object(&sealed, code_for(writable.len(), false)?, &writable, rand_usize()).await?;
+            let new = StoredRef { id, shards: set };
+            let state = self
+                .update(move |s| {
+                    // Only replace the index we started from; otherwise update() loaded a newer
+                    // head and we must merge again.
+                    if s.index.as_ref().map(|r| r.id) == before {
+                        s.index = Some(new.clone());
+                    }
+                })
+                .await?;
+            if state.index.as_ref().map(|r| r.id) == Some(id) {
+                return Ok(());
+            }
+        }
+        bail!("the library kept changing; try again")
+    }
+
+    async fn cached_or_fetch(&self, id: &ObjectId, set: &ShardSet) -> Result<Vec<u8>> {
+        let path = self.device.data_dir.join("cache").join("objects").join(id.to_hex());
+        if let Ok(b) = tokio::fs::read(&path).await
+            && id.matches(&b)
+        {
+            return Ok(b);
+        }
+        let b = self.fetch_object(id, set).await?;
+        let _ = tokio::fs::write(&path, &b).await;
+        Ok(b)
+    }
+
+    async fn manifest(&self, id: &ObjectId, entry: &IndexEntry) -> Result<FileManifest> {
+        let set = entry.at.as_ref().context("the index does not say where this file's manifest is")?;
+        let mid = entry.manifest_id(id);
+        let sealed = self.cached_or_fetch(&mid, set).await?;
+        manifest::open(self.account.root(), &mid, &sealed).map_err(|e| anyhow!("manifest {mid}: {e}"))
+    }
+
+    async fn entry(&self, file_id: &str) -> Result<(ObjectId, IndexEntry, FileManifest)> {
+        let id: ObjectId = file_id.parse().map_err(|e| anyhow!("{e}"))?;
+        let idx = self.index().await?;
+        let e = idx.entries.get(&id).filter(|e| !e.deleted).cloned().context("no such file in the library")?;
+        let m = self.manifest(&id, &e).await?;
+        Ok((id, e, m))
+    }
+
+    // -----------------------------------------------------------------------------------------
+
+    pub async fn list(&self) -> Result<Vec<Item>> {
+        let idx = self.index().await?;
+        let live: Vec<(ObjectId, IndexEntry)> = idx.entries.iter().filter(|(_, e)| !e.deleted).map(|(i, e)| (*i, e.clone())).collect();
+        let mut items: Vec<Item> = stream::iter(live)
+            .map(|(id, e)| async move { self.manifest(&id, &e).await.map(|m| Item::of(&id, &m)) })
+            .buffer_unordered(8)
+            .filter_map(|r| async move {
+                match r {
+                    Ok(i) => Some(i),
+                    Err(e) => {
+                        warn!("skipping a file: {e:#}");
+                        None
+                    }
+                }
+            })
+            .collect()
+            .await;
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_ms));
+        Ok(items)
+    }
+
+    pub async fn upload(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
+        let writable = self.writable().await;
+        let big = code_for(writable.len(), true)?;
+        let small = code_for(writable.len(), false)?;
+        let fmeta = tokio::fs::metadata(&meta.path).await.with_context(|| format!("read {}", meta.path.display()))?;
+        let total = fmeta.len();
+        let name = meta
+            .name
+            .clone()
+            .or_else(|| meta.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "untitled".into());
+        let modified_ms = meta.modified_ms.unwrap_or_else(|| {
+            fmeta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or_else(now_ms)
+        });
+
+        // Chunk and seal on a blocking thread; code and place on the network side.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(IN_FLIGHT);
+        let account = self.account.clone();
+        let path = meta.path.clone();
+        let reader = tokio::task::spawn_blocking(move || -> Result<()> {
+            let f = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(&path)?);
+            for piece in chunk::chunks(f) {
+                if tx.blocking_send(seal_chunk(account.root(), &piece?)).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        let rotate = rand_usize();
+        let mut done = 0u64;
+        progress(0, total);
+        let mut chunks = Vec::new();
+        let mut uploads = stream::poll_fn(move |cx| rx.poll_recv(cx))
+            .enumerate()
+            .map(|(i, s)| {
+                let writable = &writable;
+                async move {
+                    let set = self.store_object(&s.ciphertext, big, writable, rotate + i).await?;
+                    Ok::<_, anyhow::Error>(ChunkRef { id: s.id, key: s.key, len: s.plain_len, shards: Some(set) })
+                }
+            })
+            .buffered(IN_FLIGHT);
+        while let Some(c) = uploads.next().await {
+            let c = c?;
+            done += c.len;
+            progress(done, total);
+            chunks.push(c);
+        }
+        drop(uploads);
+        reader.await??;
+
+        let thumb = match &meta.thumb_path {
+            Some(p) => {
+                let bytes = tokio::fs::read(p).await.with_context(|| format!("read thumbnail {}", p.display()))?;
+                let s = seal_chunk(self.account.root(), &bytes);
+                let set = self.store_object(&s.ciphertext, small, &writable, rotate).await?;
+                let _ = tokio::fs::write(self.thumb_cache(&s.id), &bytes).await;
+                Some(ChunkRef { id: s.id, key: s.key, len: s.plain_len, shards: Some(set) })
+            }
+            None => None,
+        };
+        let m = FileManifest {
+            v: manifest::VERSION,
+            name,
+            size: total,
+            mime: meta.mime.clone().unwrap_or_else(|| "application/octet-stream".into()),
+            created_ms: meta.created_ms.unwrap_or(modified_ms),
+            modified_ms,
+            added_ms: now_ms(),
+            width: meta.width,
+            height: meta.height,
+            chunks,
+            thumb,
+        };
+        let (id, sealed) = manifest::seal(self.account.root(), &m);
+        let at = self.store_object(&sealed, small, &writable, rotate).await?;
+        let added = m.added_ms;
+        self.change_index(move |idx| idx.add(id, added, Some(at.clone()))).await?;
+        progress(total, total);
+        Ok(Item::of(&id, &m))
+    }
+
+    fn thumb_cache(&self, chunk: &ObjectId) -> PathBuf {
+        self.device.data_dir.join("cache").join("thumbs").join(format!("{}.jpg", chunk.to_hex()))
+    }
+
+    /// The decrypted thumbnail, cached on this device.
+    pub async fn thumb(&self, file_id: &str) -> Result<PathBuf> {
+        let (_, _, m) = self.entry(file_id).await?;
+        let t = m.thumb.context("this file has no thumbnail")?;
+        let path = self.thumb_cache(&t.id);
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(path);
+        }
+        let set = t.shards.as_ref().context("thumbnail has no shards")?;
+        let ct = self.fetch_object(&t.id, set).await?;
+        let jpeg = open_chunk(&t.id, &t.key, &ct).map_err(|e| anyhow!("{e}"))?;
+        tokio::fs::write(&path, &jpeg).await?;
+        Ok(path)
+    }
+
+    pub async fn download(&self, file_id: &str, out_path: &Path, progress: impl Fn(u64, u64)) -> Result<()> {
+        let (_, _, m) = self.entry(file_id).await?;
+        let tmp = out_path.with_file_name(format!(
+            "{}.ursa-part",
+            out_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        ));
+        let mut file = tokio::fs::File::create(&tmp).await.with_context(|| format!("create {}", tmp.display()))?;
+        let total = m.size;
+        let mut done = 0u64;
+        progress(0, total);
+        let result: Result<()> = async {
+            let mut pieces = stream::iter(m.chunks.clone())
+                .map(|c| async move {
+                    let set = c.shards.as_ref().context("chunk has no shards (a 0.1 library)")?;
+                    let ct = self.fetch_object(&c.id, set).await?;
+                    open_chunk(&c.id, &c.key, &ct).map_err(|e| anyhow!("{e}"))
+                })
+                .buffered(IN_FLIGHT);
+            while let Some(plain) = pieces.try_next().await? {
+                file.write_all(&plain).await?;
+                done += plain.len() as u64;
+                progress(done, total);
+            }
+            file.flush().await?;
+            file.sync_all().await?;
+            Ok(())
+        }
+        .await;
+        drop(file);
+        if let Err(e) = result {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e);
+        }
+        if done != total {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            bail!("got {done} of {total} bytes");
+        }
+        let _ = tokio::fs::remove_file(out_path).await;
+        tokio::fs::rename(&tmp, out_path).await?;
+        Ok(())
+    }
+
+    /// Removes a file from the library. Its shards stay until compaction exists.
+    pub async fn delete(&self, file_id: &str) -> Result<()> {
+        let id: ObjectId = file_id.parse().map_err(|e| anyhow!("{e}"))?;
+        self.change_index(move |idx| idx.delete(id)).await
+    }
+
+    /// Checks every object of every file, rebuilds missing shards onto live nodes, rewrites the
+    /// manifests and the index that moved. This is how a lost node is replaced and how a new
+    /// home node gets filled.
+    pub async fn repair(&self, progress: impl Fn(usize, usize)) -> Result<RepairReport> {
+        let writable = self.writable().await;
+        let mut report = RepairReport::default();
+        let idx = self.index().await?;
+        let live: Vec<(ObjectId, IndexEntry)> = idx.entries.iter().filter(|(_, e)| !e.deleted).map(|(i, e)| (*i, e.clone())).collect();
+        report.files = live.len();
+        let mut moved: Vec<(ObjectId, ObjectId, ShardSet, i64)> = Vec::new();
+        for (n, (id, entry)) in live.iter().enumerate() {
+            progress(n, live.len());
+            let Some(at) = &entry.at else { continue };
+            let mut m = match self.manifest(id, entry).await {
+                Ok(m) => m,
+                Err(e) => {
+                    report.unrecoverable.push(format!("{}: {e:#}", id.to_hex()));
+                    continue;
+                }
+            };
+            let mut changed = false;
+            let mut refs: Vec<&mut ChunkRef> = m.chunks.iter_mut().collect();
+            if let Some(t) = m.thumb.as_mut() {
+                refs.push(t);
+            }
+            for c in refs {
+                let Some(set) = c.shards.clone() else { continue };
+                report.objects_checked += 1;
+                match self.repair_set(&c.id, &set, &writable).await {
+                    Ok(Some(new)) => {
+                        c.shards = Some(new);
+                        changed = true;
+                        report.objects_rebuilt += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => report.unrecoverable.push(format!("{} chunk {}: {e:#}", m.name, c.id.to_hex())),
+                }
+            }
+            report.objects_checked += 1;
+            if changed {
+                // New placement: a new manifest object replaces the old one in the index.
+                let (nid, sealed) = manifest::seal(self.account.root(), &m);
+                let set = self.store_object(&sealed, at.code, &writable, rand_usize()).await?;
+                moved.push((*id, nid, set, entry.added_ms));
+                report.objects_rebuilt += 1;
+            } else if let Some(new) = self.repair_set(&entry.manifest_id(id), at, &writable).await? {
+                moved.push((*id, entry.manifest_id(id), new, entry.added_ms));
+                report.objects_rebuilt += 1;
+            }
+        }
+        progress(live.len(), live.len());
+        if !moved.is_empty() {
+            // The file keeps its id; its entry points at the manifest's new place.
+            self.change_index(move |idx| {
+                for (file, manifest, set, added) in &moved {
+                    idx.entries.entry(*file).or_insert_with(|| IndexEntry::new(*added, None)).replace(file, *manifest, set.clone());
+                }
+            })
+            .await?;
+        } else if let Some(r) = self.state().await.index {
+            // The index object itself may have lost copies.
+            if let Some(new) = self.repair_set(&r.id, &r.shards, &writable).await? {
+                report.objects_rebuilt += 1;
+                self.update(move |s| s.index = Some(StoredRef { id: r.id, shards: new.clone() })).await?;
+            }
+        }
+        // Bring every node in the pool up to the current head.
+        self.update(|_| {}).await?;
+        info!(?report, "repair finished");
+        Ok(report)
+    }
+}
+
+fn rand_usize() -> usize {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).expect("OS randomness");
+    usize::from_le_bytes(b)
+}
