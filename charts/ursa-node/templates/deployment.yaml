@@ -1,0 +1,126 @@
+{{- if not .Values.existingSecret }}
+{{- fail "existingSecret is required: a Secret holding URSA_SECRET_KEY (and S3 credentials for store: s3)" }}
+{{- end }}
+{{- if and (eq .Values.store "s3") (not .Values.s3.endpoint) }}
+{{- fail "s3.endpoint is required for store: s3" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ursa-node.fullname" . }}
+  labels:
+    {{- include "ursa-node.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Never two pods with one identity, even during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ursa-node.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ursa-node.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ursa-node
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: iroh
+              containerPort: {{ .Values.port }}
+              protocol: UDP
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: URSA_STORE
+              value: {{ .Values.store | quote }}
+            - name: URSA_DATA_DIR
+              value: /data
+            - name: URSA_PORT
+              value: {{ .Values.port | quote }}
+            - name: URSA_HEALTH_PORT
+              value: "8080"
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            {{- if eq .Values.store "s3" }}
+            - name: URSA_S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            - name: URSA_S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: URSA_S3_REGION
+              value: {{ .Values.s3.region | quote }}
+            {{- end }}
+            {{- with .Values.relayUrls }}
+            - name: URSA_RELAY_URLS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.advertise }}
+            - name: URSA_ADVERTISE
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 30
+            failureThreshold: 4
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if and (eq .Values.store "disk") .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "ursa-node.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

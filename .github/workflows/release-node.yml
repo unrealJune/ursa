@@ -1,0 +1,183 @@
+name: Release / node
+
+# Every push to main that touches the node builds and publishes it:
+#   image  ghcr.io/<owner>/ursa-node  :latest, :sha-<commit>, and :X.Y.Z + :X.Y on a release
+#   chart  oci://ghcr.io/<owner>/charts/ursa-node  0.0.0-<commit>, and X.Y.Z on a release
+# A release happens when the Conventional Commits since the last `node-v*` tag ship something
+# (scripts/next-version.sh); the workflow then pushes the tag. Deployments that follow the chart
+# with a semver range (Buttercup's HelmRelease) pick a release up on their own.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/**
+      - docker/node.Dockerfile
+      - charts/ursa-node/**
+      - scripts/next-version.sh
+      - .github/workflows/release-node.yml
+  pull_request:
+    paths:
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - charts/ursa-node/**
+      - docker/node.Dockerfile
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release to cut. `auto` follows the Conventional Commits since the last node tag.
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-node-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - uses: azure/setup-helm@v4
+      - run: helm lint charts/ursa-node --set existingSecret=x --set s3.endpoint=http://s3:8333
+
+  version:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      short: ${{ steps.ver.outputs.short }}
+      release: ${{ steps.ver.outputs.release }}
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: ver
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          set -euo pipefail
+          out="$(bash scripts/next-version.sh node --force "$BUMP")"
+          echo "$out"
+          release="$(sed -n 's/^release=//p' <<<"$out")"
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then release=false; fi
+          {
+            echo "short=$(git rev-parse --short HEAD)"
+            echo "release=${release}"
+            echo "version=$(sed -n 's/^version=//p' <<<"$out")"
+            echo "tag=$(sed -n 's/^tag=//p' <<<"$out")"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### ursa-node"
+            if [[ "$release" == "true" ]]; then
+              echo "Release **$(sed -n 's/^tag=//p' <<<"$out")** ($(sed -n 's/^level=//p' <<<"$out"))."
+            else
+              echo "No release: nothing that ships since the last node tag. Publishing \`sha-$(git rev-parse --short HEAD)\` only."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: tags
+        env:
+          SHORT: ${{ needs.version.outputs.short }}
+          RELEASE: ${{ needs.version.outputs.release }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/ursa-node"
+          tags=("${image}:latest" "${image}:sha-${SHORT}")
+          if [[ "$RELEASE" == "true" ]]; then
+            tags+=("${image}:${VERSION}" "${image}:${VERSION%.*}")
+          fi
+          (IFS=,; echo "tags=${tags[*]}") >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/node.Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=Ursa home node: encrypted object storage over iroh
+          cache-from: type=gha,scope=ursa-node
+          cache-to: type=gha,mode=max,scope=ursa-node
+
+  chart:
+    needs: [version, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | helm registry login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+      - env:
+          SHORT: ${{ needs.version.outputs.short }}
+          RELEASE: ${{ needs.version.outputs.release }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          publish() {
+            helm package charts/ursa-node --version "$1" --app-version "$2" --destination "$RUNNER_TEMP"
+            helm push "$RUNNER_TEMP/ursa-node-$1.tgz" "oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          }
+          publish "0.0.0-${SHORT}" "sha-${SHORT}"
+          if [[ "$RELEASE" == "true" ]]; then
+            publish "$VERSION" "$VERSION"
+          fi
+
+  tag:
+    needs: [version, image, chart]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag --annotate "$TAG" --message "ursa-node ${TAG#node-v}" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
