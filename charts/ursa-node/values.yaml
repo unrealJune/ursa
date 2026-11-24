@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/crypt-o-graphic/ursa-node
+  repository: ghcr.io/unrealjune/ursa-node
   # Empty: the chart's appVersion, which CI sets to the release (or sha-<commit>).
   tag: ""
   pullPolicy: IfNotPresent
