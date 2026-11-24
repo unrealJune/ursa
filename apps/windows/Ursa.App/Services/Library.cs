@@ -22,21 +22,33 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
     // -------------------------------------------------------------------------------------
     // State the UI shows
 
-    private bool ready, connected, configured, busy;
-    private string statusText = "Starting", detailText = "", deviceId = "", nodeId = "", path = "", backend = "";
+    private bool ready, connected, hasAccount, busy;
+    private string statusText = "Starting", detailText = "", deviceId = "", accountId = "", accountName = "";
     private string? error;
+    private int homeNodeCount;
 
     public bool IsReady { get => ready; private set => Set(ref ready, value); }
+    /// <summary>At least one node that takes this account's data answered.</summary>
     public bool IsConnected { get => connected; private set => Set(ref connected, value); }
-    public bool IsConfigured { get => configured; private set => Set(ref configured, value); }
+    public bool HasAccount { get => hasAccount; private set { Set(ref hasAccount, value); Changed(nameof(NeedsNode)); Changed(nameof(IsConfigured)); } }
+    /// <summary>The account has no node of its own yet: onboarding requires one.</summary>
+    public bool NeedsNode => HasAccount && homeNodeCount == 0;
+    public bool IsConfigured => HasAccount && homeNodeCount > 0;
     public bool IsBusy { get => busy; private set => Set(ref busy, value); }
     public string StatusText { get => statusText; private set => Set(ref statusText, value); }
     public string DetailText { get => detailText; private set => Set(ref detailText, value); }
     public string DeviceId { get => deviceId; private set => Set(ref deviceId, value); }
-    public string NodeId { get => nodeId; private set => Set(ref nodeId, value); }
-    public string PathKind { get => path; private set => Set(ref path, value); }
-    public string Backend { get => backend; private set => Set(ref backend, value); }
+    public string AccountId { get => accountId; private set => Set(ref accountId, value); }
+    public string AccountName { get => accountName; private set => Set(ref accountName, value); }
     public string? Error { get => error; set => Set(ref error, value); }
+    /// <summary>Why opening a stored account failed (its nodes unreachable), if it did.</summary>
+    public string? OpenError { get; private set; }
+
+    public ObservableCollection<DeviceRow> Devices { get; } = [];
+    public ObservableCollection<PoolRow> Pool { get; } = [];
+    public ObservableCollection<FriendRow> Friends { get; } = [];
+
+    public event Action? AccountChanged;
 
     // Transfers: one bar for everything in flight.
     private int transfersActive, transfersDone, transfersTotal;
@@ -47,10 +59,11 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
     public string TransferText { get => transferText; private set => Set(ref transferText, value); }
 
     // -------------------------------------------------------------------------------------
+    // Start, account, pool
 
     public async Task StartAsync()
     {
-        ui = DispatcherQueue.GetForCurrentThread();
+        ui ??= DispatcherQueue.GetForCurrentThread();
         host.Exited += reason => OnUi(() => { IsReady = false; IsConnected = false; StatusText = "Stopped"; Error = reason; });
         try
         {
@@ -59,20 +72,28 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
             var init = await host.CallAsync("init", new
             {
                 data_dir = LocalStore.HostDataDir,
-                account_key = LocalStore.AccountKeyHex(),
+                account_key = LocalStore.LoadAccountKey(),
                 relays = settings.Relays,
                 relay_token = settings.RelayToken,
+                device_name = Environment.MachineName,
+                platform = "windows",
             });
             DeviceId = init.GetProperty("device_id").GetString() ?? "";
+            OpenError = init.TryGetProperty("open_error", out var oe) ? oe.GetString() : null;
             IsReady = true;
-            await RefreshStatusAsync();
-            if (IsConnected) await RefreshAsync();
+            await RefreshAccountAsync();
+            if (HasAccount)
+            {
+                await RefreshPoolAsync();
+                if (IsConnected) await RefreshAsync();
+            }
         }
         catch (Exception e)
         {
             StatusText = "Not running";
             Error = e.Message;
         }
+        AccountChanged?.Invoke();
     }
 
     /// <summary>Restarts the host, e.g. after the relays changed.</summary>
@@ -83,36 +104,136 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         await StartAsync();
     }
 
-    public async Task RefreshStatusAsync()
+    public async Task RefreshAccountAsync()
     {
         var s = await host.CallAsync("status");
-        IsConfigured = s.GetProperty("configured").GetBoolean();
-        IsConnected = s.GetProperty("connected").GetBoolean();
-        NodeId = s.TryGetProperty("node_id", out var n) ? n.GetString() ?? "" : "";
-        PathKind = s.TryGetProperty("path", out var p) ? p.GetString() ?? "" : "";
-        Backend = s.TryGetProperty("backend", out var b) ? b.GetString() ?? "" : "";
-        if (!IsConfigured) { StatusText = "No node"; DetailText = "Connect your home node in Settings"; }
-        else if (IsConnected) { StatusText = "Connected"; DetailText = $"{(PathKind == "direct" ? "Direct" : PathKind == "relay" ? "Through a relay" : "Connecting")} · {Backend} storage"; }
-        else
+        HasAccount = s.GetProperty("has_account").GetBoolean();
+        if (!HasAccount)
         {
-            StatusText = "Offline";
-            DetailText = s.TryGetProperty("error", out var e) ? e.GetString() ?? "" : "";
+            StatusText = "No account";
+            DetailText = "";
+            return;
         }
+        AccountId = s.GetProperty("account_id").GetString() ?? "";
+        AccountName = s.GetProperty("name").GetString() ?? "";
+        homeNodeCount = s.GetProperty("home_nodes").GetArrayLength();
+        Changed(nameof(NeedsNode));
+        Changed(nameof(IsConfigured));
+        Devices.Clear();
+        foreach (var d in s.GetProperty("devices").EnumerateArray())
+            Devices.Add(new DeviceRow(d.GetProperty("name").GetString() ?? "", d.GetProperty("platform").GetString() ?? "",
+                d.GetProperty("device").GetString() ?? "", d.GetProperty("device").GetString() == DeviceId));
+        Friends.Clear();
+        foreach (var f in s.GetProperty("friends").EnumerateArray())
+            Friends.Add(new FriendRow(f.GetProperty("name").GetString() ?? "", f.GetProperty("account").GetString() ?? "", f.GetProperty("nodes").GetInt32()));
     }
 
-    public async Task ConnectAsync(string link)
+    public async Task RefreshPoolAsync()
     {
-        await host.CallAsync("connect", new { link = link.Trim() });
-        await RefreshStatusAsync();
-        await RefreshAsync();
+        var r = await host.CallAsync("pool");
+        Pool.Clear();
+        int writable = 0, direct = 0;
+        foreach (var n in r.GetProperty("nodes").EnumerateArray())
+        {
+            var row = PoolRow.FromJson(n);
+            Pool.Add(row);
+            if (row.Reachable && row.Role != "none") writable++;
+            if (row.Path == "direct") direct++;
+        }
+        IsConnected = writable > 0;
+        if (!HasAccount) { StatusText = "No account"; DetailText = ""; }
+        else if (homeNodeCount == 0) { StatusText = "No node"; DetailText = "Add a node you own in Settings"; }
+        else if (IsConnected) { StatusText = "Connected"; DetailText = $"{writable} of {Pool.Count} nodes reachable · {direct} direct"; }
+        else { StatusText = "Offline"; DetailText = "None of your nodes answered"; }
     }
 
-    public async Task ForgetAsync()
+    /// <summary>Account, then pool.</summary>
+    public async Task RefreshStatusAsync()
     {
-        await host.CallAsync("forget");
-        Items.Clear();
-        await RefreshStatusAsync();
+        await RefreshAccountAsync();
+        if (HasAccount) await RefreshPoolAsync();
     }
+
+    private async Task AdoptAccountAsync(JsonElement r)
+    {
+        LocalStore.SaveAccountKey(r.GetProperty("account_key").GetString()!);
+        OpenError = null;
+        await RefreshAccountAsync();
+        await RefreshPoolAsync();
+        if (IsConnected) await RefreshAsync();
+        AccountChanged?.Invoke();
+    }
+
+    public async Task CreateAccountAsync(string name) =>
+        await AdoptAccountAsync(await host.CallAsync("create", new { name }));
+
+    public async Task RecoverFromPhraseAsync(string phrase) =>
+        await AdoptAccountAsync(await host.CallAsync("recover", new { phrase }));
+
+    public async Task RecoverFromKeyFileAsync(string keyFileJson, string passphrase) =>
+        await AdoptAccountAsync(await host.CallAsync("recover", new { key_file = keyFileJson, passphrase }));
+
+    /// <summary>Joins an account by a link code from another device; <paramref name="onConfirmation"/> gets the 6-digit code to show.</summary>
+    public async Task JoinAsync(string code, Action<string> onConfirmation) =>
+        await AdoptAccountAsync(await host.CallAsync("link_join", new { code = code.Trim() }, onEvent: (name, e) =>
+        {
+            if (name == "link_confirm") OnUi(() => onConfirmation(e.GetProperty("code").GetString() ?? ""));
+        }));
+
+    /// <summary>
+    /// Offers a link code to a new device. <paramref name="onCode"/> gets the code to show;
+    /// <paramref name="ask"/> is asked whether to let a device in, given its name, platform and
+    /// the confirmation code both screens show. Returns the linked device's name, or null.
+    /// </summary>
+    public async Task<string?> OfferLinkAsync(Action<string> onCode, Func<string, string, string, Task<bool>> ask)
+    {
+        var r = await host.CallAsync("link_offer", onEvent: (name, e) =>
+        {
+            if (name == "link_code") OnUi(() => onCode(e.GetProperty("code").GetString() ?? ""));
+            else if (name == "link_request")
+            {
+                string who = e.GetProperty("name").GetString() ?? "", platform = e.GetProperty("platform").GetString() ?? "", code = e.GetProperty("code").GetString() ?? "";
+                OnUi(async () =>
+                {
+                    bool ok = await ask(who, platform, code);
+                    try { await host.CallAsync("link_decide", new { accept = ok }); } catch { }
+                });
+            }
+        });
+        await RefreshAccountAsync();
+        return r.TryGetProperty("linked", out var l) && l.ValueKind == JsonValueKind.String ? l.GetString() : null;
+    }
+
+    public async Task CancelLinkAsync()
+    {
+        try { await host.CallAsync("link_cancel"); } catch { }
+    }
+
+    public async Task ClaimNodeAsync(string link, string label)
+    {
+        await host.CallAsync("claim", new { link = link.Trim(), label });
+        await RefreshAccountAsync();
+        await RefreshPoolAsync();
+        if (IsConnected) await RefreshAsync();
+        AccountChanged?.Invoke();
+    }
+
+    public async Task<string> InviteAsync() => (await host.CallAsync("invite")).GetProperty("invite").GetString() ?? "";
+
+    public async Task BefriendAsync(string invite, long quotaGb)
+    {
+        await host.CallAsync("befriend", new { invite = invite.Trim(), quota_gb = quotaGb });
+        await RefreshAccountAsync();
+        await RefreshPoolAsync();
+    }
+
+    public async Task<string> RecoveryPhraseAsync() => (await host.CallAsync("recovery_phrase")).GetProperty("phrase").GetString() ?? "";
+
+    public async Task<string> KeyFileAsync(string passphrase) =>
+        (await host.CallAsync("key_file", new { passphrase })).GetProperty("key_file").GetString() ?? "";
+
+    public async Task<JsonElement> RepairAsync(IProgress<(long Done, long Total)>? progress = null) =>
+        (await host.CallAsync("repair", progress: progress)).GetProperty("report");
 
     public async Task RefreshAsync()
     {
@@ -302,4 +423,50 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         field = value;
         Changed(name);
     }
+}
+
+public sealed record DeviceRow(string Name, string Platform, string Device, bool IsThis)
+{
+    public string Detail => $"{Platform} · {Device[..Math.Min(10, Device.Length)]}{(IsThis ? " · this PC" : "")}";
+}
+
+public sealed record FriendRow(string Name, string Account, int Nodes)
+{
+    public string Title => string.IsNullOrEmpty(Name) ? Account[..Math.Min(10, Account.Length)] : Name;
+    public string Detail => $"{Account[..Math.Min(10, Account.Length)]} · {Nodes} node{(Nodes == 1 ? "" : "s")}";
+}
+
+public sealed record PoolRow(string Id, string Label, string Owner, bool Reachable, string? Path, string Role, long Used, long? Quota, string? Error)
+{
+    public static PoolRow FromJson(JsonElement n)
+    {
+        JsonElement? info = n.TryGetProperty("info", out var i) && i.ValueKind == JsonValueKind.Object ? i : null;
+        long? quota = info is { } x && x.TryGetProperty("quota_bytes", out var q) && q.ValueKind == JsonValueKind.Number ? q.GetInt64() : null;
+        return new PoolRow(
+            n.GetProperty("id").GetString() ?? "",
+            n.TryGetProperty("label", out var l) ? l.GetString() ?? "" : "",
+            n.GetProperty("owner").GetString() ?? "",
+            n.GetProperty("reachable").GetBoolean(),
+            n.TryGetProperty("path", out var p) ? p.GetString() : null,
+            info?.GetProperty("role").GetString() ?? "none",
+            info?.GetProperty("used_bytes").GetInt64() ?? 0,
+            quota,
+            n.TryGetProperty("error", out var e) ? e.GetString() : null);
+    }
+
+    public string Title => !string.IsNullOrEmpty(Label) ? Label : Owner == "home" ? $"Your node {Id[..Math.Min(8, Id.Length)]}" : $"{Owner}'s node";
+
+    public string Detail
+    {
+        get
+        {
+            if (!Reachable) return $"Unreachable · {Id[..Math.Min(10, Id.Length)]}";
+            string path = Path == "direct" ? "Direct" : Path == "relay" ? "Relay" : "Connecting";
+            string role = Role == "owner" ? "you own it" : Role == "granted" ? "shared with you" : "no access yet";
+            string quota = Quota is { } qb ? $" of {GalleryItem.FormatBytes(qb)}" : "";
+            return $"{path} · {role} · {GalleryItem.FormatBytes(Used)}{quota} used";
+        }
+    }
+
+    public string Glyph => Owner == "home" ? "" : "";
 }

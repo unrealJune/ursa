@@ -32,6 +32,7 @@
             </TitleBar.RightHeader>
         </TitleBar>
 
+        <Frame x:Name="OnboardingFrame" Grid.Row="1" Visibility="Collapsed" />
         <NavigationView x:Name="Nav" Grid.Row="1"
                         PaneDisplayMode="Left"
                         IsBackButtonVisible="Collapsed"

@@ -1,0 +1,124 @@
+<Page
+    x:Class="Ursa.App.Pages.OnboardingPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Background="Transparent">
+    <Page.Resources>
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="20" />
+        </Style>
+    </Page.Resources>
+
+    <ScrollViewer>
+        <Grid Padding="32" MaxWidth="600" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <StackPanel Spacing="16">
+                <InfoBar x:Name="Problem" Severity="Error" IsOpen="False" IsClosable="True" />
+
+                <!-- 1. Welcome -->
+                <StackPanel x:Name="StepWelcome" Spacing="16">
+                    <FontIcon Glyph="&#xE91B;" FontSize="48" HorizontalAlignment="Left" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                    <TextBlock Text="Welcome to Ursa" Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyLargeTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Your photos and files, encrypted on your own devices and kept on nodes you and your friends run. No company holds them, and none of the nodes can read them." />
+                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                        <Button Content="Create an account" Style="{StaticResource AccentButtonStyle}" Click="OnStartCreate" />
+                        <Button Content="I already use Ursa" Click="OnStartExisting" />
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- 2a. Create -->
+                <StackPanel x:Name="StepCreate" Spacing="16" Visibility="Collapsed">
+                    <TextBlock Text="Create your account" Style="{StaticResource TitleTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Your account is a key made on this PC. Your name is only shown to friends you add." />
+                    <TextBox x:Name="NameBox" Header="Your name" PlaceholderText="June" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="CreateButton" Content="Create" Style="{StaticResource AccentButtonStyle}" Click="OnCreate" />
+                        <Button Content="Back" Click="OnBack" />
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- 2b. Save the recovery key -->
+                <StackPanel x:Name="StepRecovery" Spacing="16" Visibility="Collapsed">
+                    <TextBlock Text="Save your recovery key" Style="{StaticResource TitleTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Everything you store is encrypted with your account key. If every device you own is lost, these 24 words, or a key file, are the only way back. Nobody can reset them for you." />
+                    <Border Style="{StaticResource Card}">
+                        <ItemsRepeater x:Name="Words">
+                            <ItemsRepeater.Layout>
+                                <UniformGridLayout MinItemWidth="160" MinRowSpacing="8" MinColumnSpacing="8" ItemsStretch="Fill" />
+                            </ItemsRepeater.Layout>
+                            <ItemsRepeater.ItemTemplate>
+                                <DataTemplate x:DataType="x:String">
+                                    <TextBlock Text="{x:Bind}" FontFamily="Consolas" IsTextSelectionEnabled="True" />
+                                </DataTemplate>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </Border>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Copy words" Click="OnCopyWords" />
+                        <Button Content="Save a key file…" Click="OnSaveKeyFile" />
+                    </StackPanel>
+                    <CheckBox x:Name="SavedCheck" Content="I've stored my recovery words or a key file somewhere safe" Checked="OnSavedChanged" Unchecked="OnSavedChanged" />
+                    <Button x:Name="RecoveryContinue" Content="Continue" Style="{StaticResource AccentButtonStyle}" IsEnabled="False" Click="OnRecoveryContinue" />
+                </StackPanel>
+
+                <!-- 2c. An account I already have -->
+                <StackPanel x:Name="StepExisting" Spacing="16" Visibility="Collapsed">
+                    <TextBlock Text="Use your account" Style="{StaticResource TitleTextBlockStyle}" />
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel Spacing="12">
+                            <TextBlock Text="Link with another device" Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="On a device that already uses Ursa, open Settings › Devices › Add a device, and paste the link code it shows." />
+                            <TextBox x:Name="LinkCodeBox" PlaceholderText="ursa-link:…" FontFamily="Consolas" />
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <Button x:Name="JoinButton" Content="Link" Style="{StaticResource AccentButtonStyle}" Click="OnJoin" />
+                                <StackPanel x:Name="ConfirmPanel" Orientation="Horizontal" Spacing="8" Visibility="Collapsed" VerticalAlignment="Center">
+                                    <ProgressRing IsActive="True" Width="16" Height="16" />
+                                    <TextBlock Text="Check the other device shows" VerticalAlignment="Center" />
+                                    <TextBlock x:Name="ConfirmCode" FontFamily="Consolas" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel Spacing="12">
+                            <TextBlock Text="Recover with your recovery key" Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="Ursa finds your account on your nodes and your friends' nodes, even if your own node is gone." />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="Choose key file…" Click="OnPickKeyFile" />
+                                <TextBlock x:Name="KeyFileName" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <PasswordBox x:Name="KeyFilePass" PlaceholderText="Key file passphrase" />
+                            <TextBlock Text="or" HorizontalAlignment="Left" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                            <TextBox x:Name="PhraseBox" PlaceholderText="Your 24 recovery words" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64" />
+                            <Button x:Name="RecoverButton" Content="Recover" Style="{StaticResource AccentButtonStyle}" Click="OnRecover" />
+                        </StackPanel>
+                    </Border>
+                    <Button Content="Back" Click="OnBack" />
+                </StackPanel>
+
+                <!-- 3. A node you own (required) -->
+                <StackPanel x:Name="StepNode" Spacing="16" Visibility="Collapsed">
+                    <TextBlock Text="Add a node you own" Style="{StaticResource TitleTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Ursa stores your library across nodes: always-on computers you and your friends run. Every account brings at least one, which is the space you contribute to your friends in return for theirs." />
+                    <TextBlock TextWrapping="Wrap"
+                               Text="Start ursa-node on a home server, NAS or spare PC. When it first starts it prints a claim link (ursa-claim:…). Paste it here." />
+                    <TextBox x:Name="ClaimBox" PlaceholderText="ursa-claim:…" FontFamily="Consolas" />
+                    <TextBox x:Name="NodeLabelBox" PlaceholderText="A name for it, like Home server" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="ClaimButton" Content="Add node" Style="{StaticResource AccentButtonStyle}" Click="OnClaim" />
+                        <ProgressRing x:Name="ClaimProgress" IsActive="False" Width="20" Height="20" />
+                    </StackPanel>
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

@@ -21,7 +21,7 @@ public sealed class HostClient : IAsyncDisposable
     private Process? process;
     private long nextId;
 
-    private sealed record Pending(TaskCompletionSource<JsonElement> Done, IProgress<(long Done, long Total)>? Progress);
+    private sealed record Pending(TaskCompletionSource<JsonElement> Done, IProgress<(long Done, long Total)>? Progress, Action<string, JsonElement>? OnEvent);
 
     public event Action<string>? Exited;
 
@@ -88,14 +88,14 @@ public sealed class HostClient : IAsyncDisposable
 
     /// <summary>Sends <paramref name="cmd"/> with the public properties of <paramref name="args"/>.</summary>
     public async Task<JsonElement> CallAsync(string cmd, object? args = null,
-        IProgress<(long Done, long Total)>? progress = null)
+        IProgress<(long Done, long Total)>? progress = null, Action<string, JsonElement>? onEvent = null)
     {
         var p = process ?? throw new HostException("ursa-host is not running");
         long id = Interlocked.Increment(ref nextId);
         var request = (args is null ? null : JsonSerializer.SerializeToNode(args, Json) as JsonObject) ?? new JsonObject();
         request["id"] = id;
         request["cmd"] = cmd;
-        var call = new Pending(new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously), progress);
+        var call = new Pending(new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously), progress, onEvent);
         pending[id] = call;
         await writeLock.WaitAsync();
         try
@@ -129,10 +129,15 @@ public sealed class HostClient : IAsyncDisposable
                 catch { continue; }
                 if (!msg.TryGetProperty("id", out var idProp) || idProp.ValueKind != JsonValueKind.Number) continue;
                 long id = idProp.GetInt64();
-                if (msg.TryGetProperty("event", out var ev) && ev.GetString() == "progress")
+                if (msg.TryGetProperty("event", out var ev))
                 {
                     if (pending.TryGetValue(id, out var call))
-                        call.Progress?.Report((msg.GetProperty("done").GetInt64(), msg.GetProperty("total").GetInt64()));
+                    {
+                        if (ev.GetString() == "progress")
+                            call.Progress?.Report((msg.GetProperty("done").GetInt64(), msg.GetProperty("total").GetInt64()));
+                        else
+                            call.OnEvent?.Invoke(ev.GetString() ?? "", msg);
+                    }
                     continue;
                 }
                 if (pending.TryRemove(id, out var done)) done.Done.TrySetResult(msg);

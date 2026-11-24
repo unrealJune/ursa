@@ -38,6 +38,9 @@ public sealed partial class GalleryPage : Page
         CloseViewer();
     }
 
+    /// <summary>Re-evaluates the empty and connection states (after onboarding).</summary>
+    public void Refresh() => UpdateStates();
+
     public bool HasError(string? error) => !string.IsNullOrEmpty(error);
 
     private void OnErrorClosed(InfoBar sender, object args) => Library.Error = null;
@@ -65,13 +68,13 @@ public sealed partial class GalleryPage : Page
         EmptyState.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         if (!Library.IsConfigured)
         {
-            EmptyTitle.Text = "Connect your home node";
-            EmptyBody.Text = "Ursa keeps your library on your own node. Paste the claim link it printed when it first started.";
+            EmptyTitle.Text = "Add a node you own";
+            EmptyBody.Text = "Ursa keeps your library on nodes you and your friends run. Add yours in Settings.";
             EmptyAction.Content = "Open Settings";
         }
         else if (!Library.IsConnected)
         {
-            EmptyTitle.Text = "Can't reach your node";
+            EmptyTitle.Text = "Can't reach your nodes";
             EmptyBody.Text = string.IsNullOrEmpty(Library.DetailText) ? "It may be offline. Ursa will keep trying." : Library.DetailText;
             EmptyAction.Content = "Try again";
         }
