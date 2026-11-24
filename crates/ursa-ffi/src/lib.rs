@@ -401,6 +401,16 @@ impl UrsaCore {
         on_rt(async move { inner.status(None).await }).await
     }
 
+    /// Re-reads the account from its nodes (what other devices changed), then the status.
+    pub async fn refresh(&self) -> Res<Status> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            inner.session().await?.refresh().await?;
+            inner.status(None).await
+        })
+        .await
+    }
+
     /// A new account, with this device as its first.
     pub async fn create_account(&self, name: String) -> Res<AccountKeys> {
         let inner = self.inner.clone();

@@ -322,6 +322,20 @@ impl Session {
         state.pool()
     }
 
+    /// Re-reads the account from its nodes, for what other devices changed since this one last
+    /// looked: devices added, files uploaded, friends made. The head was otherwise read only when
+    /// the account was opened, so a phone's photos never reached a running Windows app. Keeps
+    /// what it has when no node answers.
+    pub async fn refresh(&self) -> Result<()> {
+        let before = self.seq().await;
+        self.load_head().await?;
+        let after = self.seq().await;
+        if after != before {
+            info!(?before, ?after, "refresh: the account changed elsewhere");
+        }
+        Ok(())
+    }
+
     /// Reads the newest head from every node this device can think of: those in the current
     /// state, those it remembered on disk, and those the pkarr locator lists.
     pub async fn load_head(&self) -> Result<()> {

@@ -61,6 +61,8 @@ enum Command {
     LinkDecide { accept: bool },
     LinkCancel,
     Status,
+    /// Re-reads the account from its nodes, then answers like `status`.
+    Refresh,
     Pool,
     Claim { link: String, #[serde(default)] label: String },
     ForgetNode { node_id: String },
@@ -285,6 +287,10 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
             Ok(json!({}))
         }
         Command::Status => host.status().await,
+        Command::Refresh => {
+            host.session().await?.refresh().await?;
+            host.status().await
+        }
         Command::Pool => Ok(json!({ "nodes": host.session().await?.pool().await })),
         Command::Claim { link, label } => {
             let s = host.session().await?;

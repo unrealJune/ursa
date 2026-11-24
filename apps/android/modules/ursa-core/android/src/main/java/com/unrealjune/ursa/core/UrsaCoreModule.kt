@@ -74,6 +74,8 @@ class UrsaCoreModule : Module() {
 
     AsyncFunction("status") Coroutine { -> call { core.status().toMap() } }
 
+    AsyncFunction("refresh") Coroutine { -> call { core.refresh().toMap() } }
+
     AsyncFunction("createAccount") Coroutine { name: String -> call { core.createAccount(name).toMap() } }
 
     AsyncFunction("recoverPhrase") Coroutine { phrase: String -> call { core.recoverPhrase(phrase).toMap() } }
