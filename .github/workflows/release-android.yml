@@ -6,12 +6,14 @@ name: Release / Android app
 # something (scripts/next-version.sh android) and attaches the APK to that GitHub release. Other
 # builds keep the APK as a workflow artifact.
 #
-# Caches: GitHub only lets a run read caches saved on its own ref, its base branch or the default
-# branch, so whatever a pull request saves is readable by that pull request alone, while still
-# counting against the repository's 10 GB and evicting the shared entries. As on Street Cryptid,
-# the branches pull requests are based on do the saving (every push to main or android-app builds
-# and saves, which is the cache warming), and pull-request builds only restore. The one exception
-# is the built core: it is small, and a pull request's next push reuses it when no crate changed.
+# Caches: GitHub lets a run read caches saved on its own ref, its base branch or the default
+# branch. Two kinds of saving, then:
+# - Warming: every push to main or android-app builds and saves, so a new pull request's first
+#   build starts from its base branch instead of from nothing.
+# - Iteration: pull requests save too. Those entries are readable by that pull request alone, and
+#   its next push restores them first (a restore looks in the run's own ref before the base), so
+#   only what changed since its last push is rebuilt. cache-cleanup.yml deletes them when the pull
+#   request closes, so they do not sit in the repository's 10 GB evicting the shared entries.
 # The Rust target, ccache and Gradle keys leave the ABIs out: a release (arm64-v8a and x86_64)
 # fills a superset of what an arm64-only pull-request build reads.
 #
@@ -97,9 +99,6 @@ jobs:
       # both the Rust and the C++ work) and no R8. Releases ship both ABIs, shrunk.
       FAST: ${{ github.ref != 'refs/heads/main' }}
       ABIS: ${{ github.ref != 'refs/heads/main' && 'arm64-v8a' || 'arm64-v8a x86_64' }}
-      # Pull requests restore what their base branch (or main) saved and save nothing of their
-      # own but the built core.
-      SAVE_CACHES: ${{ github.event_name != 'pull_request' }}
       # Gradle reuses task outputs across runs only with its build cache on (setup-gradle saves
       # ~/.gradle/caches/build-cache-1 with the rest of Gradle's home).
       GRADLE_OPTS: -Dorg.gradle.caching=true -Dorg.gradle.parallel=true -Dorg.gradle.jvmargs=-Xmx5g
@@ -167,7 +166,6 @@ jobs:
         if: steps.have.outputs.core != 'true'
         with:
           key: android
-          save-if: ${{ env.SAVE_CACHES == 'true' }}
       - uses: taiki-e/install-action@v2
         if: steps.have.outputs.core != 'true'
         with:
@@ -194,11 +192,11 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      # By default only the default branch saves; android-app must too, since its pull requests
-      # read from it. Pull requests only read.
+      # By default only the default branch saves. android-app must too (its pull requests read from
+      # it), and so do pull requests, so a pull request's next push finds this one's task outputs.
       - uses: gradle/actions/setup-gradle@v4
         with:
-          cache-read-only: ${{ env.SAVE_CACHES != 'true' }}
+          cache-read-only: false
 
       # React Native's libraries build their C++ through CMake (the `buildCMake*` tasks), which
       # Gradle's build cache does not cover. CMake takes its compiler launcher from the
@@ -221,8 +219,8 @@ jobs:
             echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
           } >> "$GITHUB_ENV"
-      # A new entry every saving run (an exact hit never saves, so a fixed key would freeze),
-      # restored from the newest one the base branch or main saved.
+      # A new entry every run (an exact hit never saves, so a fixed key would freeze), restored
+      # from the newest one: this pull request's last build, else its base branch's or main's.
       - name: Restore ccache
         id: ccache
         uses: actions/cache/restore@v4
@@ -282,7 +280,7 @@ jobs:
         run: ccache --show-stats || true
       # Saved even after a failed build, so what it compiled still warms the next one.
       - name: Save ccache
-        if: ${{ !cancelled() && env.SAVE_CACHES == 'true' }}
+        if: '!cancelled()'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/ccache
