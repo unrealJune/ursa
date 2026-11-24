@@ -2,7 +2,7 @@ import { errorText, type LibraryItem, Ursa } from 'ursa-core';
 
 import { saveFile } from './files';
 import { syncAccount } from './session';
-import { createStore, singleFlight } from './state';
+import { createStore, singleFlight, useStore } from './state';
 import { log } from './telemetry';
 
 /** A batch the person started on several files at once (delete, save). */
@@ -25,7 +25,9 @@ const EMPTY: LibraryState = { items: [], loaded: false, loading: false, error: n
 
 export const library = createStore<LibraryState>(EMPTY);
 
-export const useLibrary = library.use;
+export function useLibrary<U>(select: (s: LibraryState) => U): U {
+  return useStore(library, select);
+}
 
 const newestFirst = (a: LibraryItem, b: LibraryItem) => b.createdMs - a.createdMs || (a.fileId < b.fileId ? -1 : 1);
 

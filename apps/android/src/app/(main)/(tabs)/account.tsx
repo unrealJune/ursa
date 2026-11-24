@@ -4,7 +4,7 @@ import * as Clipboard from 'expo-clipboard';
 import { useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 
-import { library } from '@/core/library';
+import { useLibrary } from '@/core/library';
 import { setPrefs, signOut, useSession } from '@/core/session';
 import { telemetryEnabled, telemetryId } from '@/core/telemetry';
 import { shortId } from '@/format';
@@ -14,7 +14,7 @@ import { Divider, Group, Icon, ListRow, Page, SectionHeader, Switch, TopBar, Txt
 export default function Account() {
   const status = useSession((s) => s.status);
   const prefs = useSession((s) => s.prefs);
-  const count = library.use((s) => s.items.length);
+  const count = useLibrary((s) => s.items.length);
   const { c } = useTheme();
   const [telemetry, setTelemetry] = useState<string | null>(null);
   useEffect(() => {

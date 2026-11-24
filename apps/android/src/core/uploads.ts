@@ -4,7 +4,7 @@ import { errorText, type UploadMeta, Ursa, withProgress } from 'ursa-core';
 
 import { upsert } from './library';
 import { session } from './session';
-import { createStore, singleFlight } from './state';
+import { createStore, singleFlight, useStore } from './state';
 import { log } from './telemetry';
 
 export type QueueItem = { uri: string; meta: UploadMeta; assetId?: string };
@@ -24,7 +24,9 @@ const IDLE: UploadsState = { total: 0, done: 0, failed: 0, current: null, lastEr
 
 export const uploads = createStore<UploadsState>(IDLE);
 
-export const useUploads = uploads.use;
+export function useUploads<U>(select: (s: UploadsState) => U): U {
+  return useStore(uploads, select);
+}
 
 /** Which camera-roll assets are backed up (asset id → file id), on this phone only. */
 const backedUp = {
