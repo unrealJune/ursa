@@ -86,20 +86,38 @@ pub fn open_chunk(id: &ObjectId, key: &[u8; 32], ciphertext: &[u8]) -> Result<Ve
 }
 
 pub(crate) fn seal_manifest_bytes(account: &AccountKey, plaintext: &[u8]) -> Vec<u8> {
+    seal_manifest_bytes_aad(account, plaintext, MANIFEST_AAD)
+}
+
+/// Seals under a fresh key derived from the account key and a random nonce stored in front.
+pub(crate) fn seal_manifest_bytes_aad(account: &AccountKey, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).expect("OS randomness");
     let key = account.manifest_key(&nonce);
     let mut out = nonce.to_vec();
-    out.extend_from_slice(&seal(&key, plaintext, MANIFEST_AAD));
+    out.extend_from_slice(&seal(&key, plaintext, aad));
     out
 }
 
 pub(crate) fn open_manifest_bytes(account: &AccountKey, sealed: &[u8]) -> Result<Vec<u8>> {
+    open_manifest_bytes_aad(account, sealed, MANIFEST_AAD)
+}
+
+pub(crate) fn open_manifest_bytes_aad(account: &AccountKey, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
     if sealed.len() < 16 + TAG_LEN {
-        return Err(Error::Malformed("manifest"));
+        return Err(Error::Malformed("sealed object"));
     }
     let nonce: [u8; 16] = sealed[..16].try_into().unwrap();
-    open(&account.manifest_key(&nonce), &sealed[16..], MANIFEST_AAD)
+    open(&account.manifest_key(&nonce), &sealed[16..], aad)
+}
+
+/// AES-256-GCM under a key used for exactly one plaintext (fixed nonce).
+pub(crate) fn seal_with(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
+    seal(key, plaintext, aad)
+}
+
+pub(crate) fn open_with(key: &[u8; 32], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    open(key, ciphertext, aad)
 }
 
 fn cipher(key: &[u8; 32]) -> LessSafeKey {

@@ -7,8 +7,11 @@
 //! - [`chunk`]: content-defined chunking (FastCDC), so an edit changes a few chunks.
 //! - [`manifest`]: what a file is made of, sealed under a key only the account can derive.
 
+pub mod account;
 pub mod chunk;
+pub mod coding;
 pub mod crypto;
+pub mod head;
 pub mod manifest;
 
 mod id;

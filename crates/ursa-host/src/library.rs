@@ -317,7 +317,7 @@ impl Library {
                     if !client.has(vec![s.id]).await?.first().copied().unwrap_or(false) {
                         client.put(s.id, &s.ciphertext).await?;
                     }
-                    Ok::<_, anyhow::Error>(ChunkRef { id: s.id, key: s.key, len: s.plain_len })
+                    Ok::<_, anyhow::Error>(ChunkRef { id: s.id, key: s.key, len: s.plain_len, shards: None })
                 }
             })
             .buffered(IN_FLIGHT);
@@ -337,7 +337,7 @@ impl Library {
                 let bytes = tokio::fs::read(p).await.with_context(|| format!("read thumbnail {}", p.display()))?;
                 let s = seal_chunk(&self.account, &bytes);
                 client.put(s.id, &s.ciphertext).await?;
-                Some(ChunkRef { id: s.id, key: s.key, len: s.plain_len })
+                Some(ChunkRef { id: s.id, key: s.key, len: s.plain_len, shards: None })
             }
             None => None,
         };
