@@ -36,6 +36,9 @@ struct Args {
     s3_bucket: Option<String>,
     #[arg(long, env = "URSA_S3_REGION", default_value = "us-east-1")]
     s3_region: String,
+    /// A path inside the bucket for this node's keys, so several nodes can share one bucket.
+    #[arg(long, env = "URSA_S3_PREFIX", default_value = "")]
+    s3_prefix: String,
 
     /// The node's identity as 64 hex characters. Unset: read or create `<data-dir>/node.key`.
     #[arg(long, env = "URSA_SECRET_KEY", hide_env_values = true)]
@@ -76,6 +79,7 @@ async fn main() -> Result<()> {
             endpoint: args.s3_endpoint.clone().context("URSA_S3_ENDPOINT is required for the s3 store")?,
             bucket: args.s3_bucket.clone().context("URSA_S3_BUCKET is required for the s3 store")?,
             region: args.s3_region.clone(),
+            prefix: args.s3_prefix.clone(),
             access_key_id: std::env::var("AWS_ACCESS_KEY_ID").context("AWS_ACCESS_KEY_ID is required")?,
             secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")
                 .context("AWS_SECRET_ACCESS_KEY is required")?,
@@ -92,7 +96,7 @@ async fn main() -> Result<()> {
         }
         None => new_claim_code(),
     };
-    let node = Node::new(store, claim_code.clone()).await.context("open the store")?;
+    let node = Node::new(store, secret.public().to_string(), claim_code.clone()).await.context("open the store")?;
 
     let mut builder = Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
     if !args.relay.is_empty() {

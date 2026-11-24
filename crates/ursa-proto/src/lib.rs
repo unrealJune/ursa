@@ -1,14 +1,19 @@
-//! The protocol between an Ursa client and a node, over iroh.
+//! The protocol between Ursa devices and nodes over iroh: `ursa/node/2`.
 //!
 //! One bidirectional QUIC stream per request. Each side sends a length-prefixed JSON header
-//! (`u32` big-endian length, then JSON); a `put` request is followed by exactly `len` bytes of
-//! object, and a successful `get` response by exactly `len` bytes. Streams are read to an exact
-//! length, never "to the end" (see Street Cryptid's noq `read_to_end` patch).
+//! (`u32` big-endian length, then JSON); a `put` is followed by exactly `len` bytes of object,
+//! and a successful `get` response by exactly `len` bytes. Streams are read to an exact length,
+//! never "to the end".
 //!
-//! A node stores opaque objects named by their BLAKE3 hash and checks every `put` against it. It
-//! keeps one index: the set of manifest ids that make up its owner's library. Every request but
-//! `info` and `claim` requires the caller to be an owner; `claim` with the node's claim code
-//! makes the caller one.
+//! **Accounts, not devices.** The first request on a connection is `auth` with the device's
+//! certificate; the node checks it is signed by the account and names this connection's own
+//! endpoint id, and from then on serves that account. Nodes know accounts as
+//!
+//! - **owners**, who claimed the node with its claim code and may grant others space, and
+//! - **granted** accounts (friends), with a byte quota.
+//!
+//! Objects live in a per-account namespace, named by their BLAKE3 hash and checked on every
+//! `put`. Each account also has one **head**, stored with compare-and-set on its sequence number.
 
 use std::str::FromStr;
 
@@ -17,24 +22,34 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 use ursa_core::ObjectId;
+use ursa_core::account::{AccountId, DeviceCert};
+use ursa_core::head::Head;
 
-pub const ALPN: &[u8] = b"ursa/node/1";
-/// Headers are small; this bounds what a peer can make us allocate before we have checked it.
+pub mod link;
+
+pub const ALPN: &[u8] = b"ursa/node/2";
+/// Headers are small (a head with its keys is ~10 KB); this bounds what a peer can make us
+/// allocate before we have checked anything.
 pub const MAX_HEADER: usize = 1 << 20;
-/// The largest object a node accepts: a 4 MiB chunk plus its tag, or a manifest, with room.
+/// The largest object a node accepts: a coded shard of a 4 MiB chunk, a manifest, an index.
 pub const MAX_OBJECT: u64 = 32 << 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
+    Auth { cert: Box<DeviceCert> },
     Info,
     Claim { code: String },
+    Grant { account: AccountId, quota_bytes: u64 },
+    Revoke { account: AccountId },
     Put { id: ObjectId, len: u64 },
     Get { id: ObjectId },
     Has { ids: Vec<ObjectId> },
-    IndexAdd { id: ObjectId },
-    IndexRemove { id: ObjectId },
-    IndexList,
+    Delete { ids: Vec<ObjectId> },
+    HeadGet,
+    /// Stores `head` if the node's current head for the account has `expected_seq` (or there is
+    /// none and `expected_seq` is `None`), and `head.seq` is greater.
+    HeadPut { head: Box<Head>, expected_seq: Option<u64> },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -42,17 +57,19 @@ pub struct Response {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why a `head_put` lost: the node's current head, so the caller can merge and retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<Box<Head>>,
     /// For `get`: the length of the object that follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub len: Option<u64>,
-    /// For `index_list`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ids: Vec<ObjectId>,
     /// For `has`, in request order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub have: Vec<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub info: Option<NodeInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Box<Head>>,
 }
 
 impl Response {
@@ -70,9 +87,32 @@ pub struct NodeInfo {
     pub version: String,
     /// Where the node keeps objects: `disk` or `s3`.
     pub backend: String,
+    pub node_id: String,
     pub claimed: bool,
-    /// Whether the caller is one of the owners.
-    pub owner: bool,
+    /// The caller's standing with this node.
+    pub role: Role,
+    /// Bytes the caller's account stores here, and its quota (`None`: unlimited, owners).
+    pub used_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_bytes: Option<u64>,
+    /// Owners only: every account granted space, with use and quota.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<GrantInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    None,
+    Owner,
+    Granted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantInfo {
+    pub account: AccountId,
+    pub quota_bytes: u64,
+    pub used_bytes: u64,
 }
 
 pub async fn write_header<T: Serialize>(send: &mut SendStream, value: &T) -> Result<()> {
@@ -104,9 +144,9 @@ pub async fn read_body(recv: &mut RecvStream, len: u64) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Claim links
+// Claim links and addresses
 
-/// What a node prints for its owner's first device: `ursa-claim:<code>@<endpoint ticket>`.
+/// What a node prints for its owner: `ursa-claim:<code>@<endpoint ticket>`.
 #[derive(Debug, Clone)]
 pub struct ClaimLink {
     pub code: String,
@@ -117,15 +157,11 @@ impl ClaimLink {
     pub fn new(code: String, addr: EndpointAddr) -> Self {
         Self { code, addr }
     }
-
-    pub fn ticket(&self) -> String {
-        iroh_tickets::endpoint::EndpointTicket::new(self.addr.clone()).to_string()
-    }
 }
 
 impl std::fmt::Display for ClaimLink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ursa-claim:{}@{}", self.code, self.ticket())
+        write!(f, "ursa-claim:{}@{}", self.code, ticket_of(&self.addr))
     }
 }
 
@@ -156,23 +192,36 @@ pub fn ticket_of(addr: &EndpointAddr) -> String {
 // ---------------------------------------------------------------------------------------------
 // Client
 
-/// A connection to one node.
+/// An authenticated connection to one node, on behalf of one account.
 #[derive(Clone)]
 pub struct NodeClient {
     conn: Connection,
 }
 
+/// Outcome of a head write.
+pub enum HeadPut {
+    Stored,
+    /// Someone else wrote first; this is the node's current head.
+    Conflict(Box<Head>),
+}
+
 impl NodeClient {
-    pub async fn connect(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Self> {
+    /// Connects and authenticates with the device's certificate.
+    pub async fn connect(endpoint: &Endpoint, addr: EndpointAddr, cert: &DeviceCert) -> Result<Self> {
         let conn = endpoint.connect(addr, ALPN).await.context("connect to node")?;
-        Ok(Self { conn })
+        let c = Self { conn };
+        c.call(&Request::Auth { cert: Box::new(cert.clone()) }, None).await.context("authenticate")?;
+        Ok(c)
     }
 
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
 
-    /// `true` once the connection has closed; the caller should reconnect.
+    pub fn node_id(&self) -> String {
+        self.conn.remote_id().to_string()
+    }
+
     pub fn is_closed(&self) -> bool {
         self.conn.close_reason().is_some()
     }
@@ -185,7 +234,7 @@ impl NodeClient {
         }
         send.finish()?;
         let resp: Response = read_header(&mut recv).await?;
-        if !resp.ok {
+        if !resp.ok && resp.conflict.is_none() {
             bail!("node refused: {}", resp.error.as_deref().unwrap_or("no reason given"));
         }
         Ok((resp, recv))
@@ -198,6 +247,14 @@ impl NodeClient {
 
     pub async fn claim(&self, code: &str) -> Result<()> {
         self.call(&Request::Claim { code: code.to_string() }, None).await.map(|_| ())
+    }
+
+    pub async fn grant(&self, account: AccountId, quota_bytes: u64) -> Result<()> {
+        self.call(&Request::Grant { account, quota_bytes }, None).await.map(|_| ())
+    }
+
+    pub async fn revoke(&self, account: AccountId) -> Result<()> {
+        self.call(&Request::Revoke { account }, None).await.map(|_| ())
     }
 
     pub async fn put(&self, id: ObjectId, bytes: &[u8]) -> Result<()> {
@@ -224,16 +281,20 @@ impl NodeClient {
         Ok(r.have)
     }
 
-    pub async fn index_add(&self, id: ObjectId) -> Result<()> {
-        self.call(&Request::IndexAdd { id }, None).await.map(|_| ())
+    pub async fn delete(&self, ids: Vec<ObjectId>) -> Result<()> {
+        self.call(&Request::Delete { ids }, None).await.map(|_| ())
     }
 
-    pub async fn index_remove(&self, id: ObjectId) -> Result<()> {
-        self.call(&Request::IndexRemove { id }, None).await.map(|_| ())
+    pub async fn head_get(&self) -> Result<Option<Head>> {
+        Ok(self.call(&Request::HeadGet, None).await?.0.head.map(|h| *h))
     }
 
-    pub async fn index_list(&self) -> Result<Vec<ObjectId>> {
-        Ok(self.call(&Request::IndexList, None).await?.0.ids)
+    pub async fn head_put(&self, head: &Head, expected_seq: Option<u64>) -> Result<HeadPut> {
+        let (r, _) = self.call(&Request::HeadPut { head: Box::new(head.clone()), expected_seq }, None).await?;
+        Ok(match r.conflict {
+            Some(h) => HeadPut::Conflict(h),
+            None => HeadPut::Stored,
+        })
     }
 }
 
