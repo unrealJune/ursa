@@ -1,0 +1,68 @@
+image:
+  repository: ghcr.io/crypt-o-graphic/ursa-node
+  # Empty: the chart's appVersion, which CI sets to the release (or sha-<commit>).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The repository is private, so its images are too: name a docker-registry Secret for GHCR.
+imagePullSecrets: []
+
+# One node identity per deployment. Two pods would answer for the same endpoint id.
+replicaCount: 1
+
+# Where objects live: `s3` (any S3-compatible store, e.g. SeaweedFS) or `disk` (a volume).
+store: s3
+
+s3:
+  # Path-style; http is fine inside a cluster.
+  endpoint: ""
+  bucket: ursa
+  region: us-east-1
+
+# An existing Secret with the node's keys. The chart never creates one, so the identity stays
+# out of Helm history. Keys read:
+#   URSA_SECRET_KEY        64 hex characters: the node's iroh identity (required)
+#   URSA_CLAIM_CODE        what a new device presents to become an owner (optional; random if unset)
+#   AWS_ACCESS_KEY_ID      S3 credentials (store: s3)
+#   AWS_SECRET_ACCESS_KEY
+#   URSA_RELAY_TOKEN       auth token for the relays below (optional)
+existingSecret: ""
+
+# Relays to use instead of n0's public ones (S2: those carried almost nothing).
+relayUrls: []
+
+# The iroh UDP port, fixed so it can be published and advertised.
+port: 7842
+
+# Publish the UDP port so devices on the same network reach the node directly instead of going
+# out to a relay and back (S2: a LAN client of a pod got only relay paths). With NodePort, set
+# `advertise` to <node IP>:<nodePort> for each node that should be dialled.
+service:
+  enabled: false
+  type: NodePort
+  nodePort: null
+  annotations: {}
+advertise: []
+
+persistence:
+  # Only for store: disk.
+  enabled: false
+  size: 50Gi
+  storageClass: ""
+  existingClaim: ""
+
+logLevel: info,iroh=warn,noq=warn
+
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    memory: 512Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

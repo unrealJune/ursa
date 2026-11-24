@@ -1,0 +1,6 @@
+target
+spikes
+apps
+**/bin
+**/obj
+.git

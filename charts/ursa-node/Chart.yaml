@@ -1,0 +1,7 @@
+apiVersion: v2
+name: ursa-node
+description: An Ursa home node. Stores encrypted objects for its owner in S3-compatible storage (or on a volume) and serves them over iroh.
+type: application
+# CI sets both on publish: the release version, or 0.0.0-<sha> for a build between releases.
+version: 0.0.0
+appVersion: "0.0.0"
