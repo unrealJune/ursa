@@ -2,14 +2,14 @@
 # The next release of a product, from the Conventional Commits that touched its paths since its
 # last tag. Prints `release=true|false`, `version=X.Y.Z`, `tag=<prefix>X.Y.Z`, `level=…`.
 #
-#   scripts/next-version.sh node|windows [--force auto|patch|minor|major]
+#   scripts/next-version.sh node|windows|android [--force auto|patch|minor|major]
 #
 # feat → minor, any other type that ships (fix, perf, revert, or no type) → patch,
 # `type!:` or a BREAKING CHANGE footer → major. docs/chore/ci/test/style/build/refactor ship
 # nothing. The first release of a product is 0.1.0 whatever the level.
 set -euo pipefail
 
-product="${1:?product: node or windows}"
+product="${1:?product: node, windows or android}"
 shift
 force=auto
 if [[ "${1:-}" == "--force" ]]; then
@@ -19,11 +19,15 @@ fi
 case "$product" in
   node)
     prefix=node-v
-    paths=(crates Cargo.toml Cargo.lock .cargo docker/node.Dockerfile charts/ursa-node)
+    paths=(crates ':(exclude)crates/ursa-ffi' Cargo.toml Cargo.lock .cargo docker/node.Dockerfile charts/ursa-node)
     ;;
   windows)
     prefix=windows-v
-    paths=(crates Cargo.toml Cargo.lock .cargo apps/windows)
+    paths=(crates ':(exclude)crates/ursa-ffi' Cargo.toml Cargo.lock .cargo apps/windows)
+    ;;
+  android)
+    prefix=android-v
+    paths=(crates ':(exclude)crates/ursa-node' ':(exclude)crates/ursa-host' ':(exclude)crates/ursa-cli' Cargo.toml Cargo.lock .cargo apps/android)
     ;;
   *)
     echo "unknown product: $product" >&2

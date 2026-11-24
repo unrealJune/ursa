@@ -1,0 +1,175 @@
+name: Release / Android app
+
+# Builds the Ursa Android app: the Rust core (crate ursa-ffi) for arm64-v8a and x86_64 with its
+# Kotlin bindings, then the Expo app around it (prebuild + Gradle), into one APK. A push to main
+# that touches the app or the core cuts `android-vX.Y.Z` when its Conventional Commits ship
+# something (scripts/next-version.sh android) and attaches the APK to that GitHub release. Other
+# builds keep the APK as a workflow artifact.
+#
+# Signing: with the ANDROID_KEYSTORE_B64 secret (plus ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS
+# and ANDROID_KEY_PASSWORD) the APK is signed with that key; without it, with the Expo template's
+# debug key. Android only installs an update signed by the same key as the installed app.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/android/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/**
+      - scripts/next-version.sh
+      - .github/workflows/release-android.yml
+  pull_request:
+    paths:
+      - apps/android/**
+      - crates/ursa-ffi/**
+      - crates/ursa-client/**
+      - crates/ursa-core/**
+      - crates/ursa-proto/**
+      - .github/workflows/release-android.yml
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release to cut. `auto` follows the Conventional Commits since the last android tag.
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      release: ${{ steps.ver.outputs.release }}
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: ver
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          set -euo pipefail
+          out="$(bash scripts/next-version.sh android --force "$BUMP")"
+          echo "$out"
+          release="$(sed -n 's/^release=//p' <<<"$out")"
+          version="$(sed -n 's/^version=//p' <<<"$out")"
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then release=false; fi
+          if [[ "$release" != "true" ]]; then version="${version}-ci.${GITHUB_RUN_NUMBER}"; fi
+          {
+            echo "release=${release}"
+            echo "version=${version}"
+            echo "tag=$(sed -n 's/^tag=//p' <<<"$out")"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      URSA_VERSION: ${{ needs.version.outputs.version }}
+      URSA_VERSION_CODE: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Build the core and its Kotlin bindings
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          bash apps/android/scripts/build-core.sh arm64-v8a x86_64
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install and check the app
+        working-directory: apps/android
+        run: |
+          bun install --frozen-lockfile
+          bunx tsc --noEmit
+          bunx eslint src modules/ursa-core/index.ts
+
+      - name: Prebuild
+        working-directory: apps/android
+        run: bunx expo prebuild --platform android --no-install
+
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [[ -n "${KEYSTORE_B64}" ]]; then
+            echo "${KEYSTORE_B64}" | base64 -d > "$RUNNER_TEMP/ursa.keystore"
+            echo "URSA_KEYSTORE_PATH=$RUNNER_TEMP/ursa.keystore" >> "$GITHUB_ENV"
+            echo "Signing with the release key."
+          else
+            echo "::warning::ANDROID_KEYSTORE_B64 is not set: the APK is signed with the Expo template's debug key."
+          fi
+
+      - name: Gradle
+        working-directory: apps/android/android
+        env:
+          URSA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          URSA_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          URSA_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          # Only the ABIs the core was built for.
+          ORG_GRADLE_PROJECT_reactNativeArchitectures: arm64-v8a,x86_64
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Check the core shipped
+        run: |
+          set -euo pipefail
+          apk="$(ls apps/android/android/app/build/outputs/apk/release/*.apk | head -n 1)"
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/libursa_ffi.so'
+          mkdir -p dist
+          cp "$apk" "dist/Ursa-${URSA_VERSION}.apk"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ursa-android
+          path: dist
+
+  release:
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ursa-android
+          path: dist
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/*.apk --target "$GITHUB_SHA" --title "Ursa for Android ${VERSION}" \
+            --notes "Preview APK (arm64 phones and x86_64 emulators). Install it from the file; updates are not automatic."
