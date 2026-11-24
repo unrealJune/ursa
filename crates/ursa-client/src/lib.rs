@@ -225,6 +225,11 @@ pub struct Session {
     down: std::sync::Mutex<HashMap<String, Instant>>,
     /// The newest head seen (None before the first save) and its opened state.
     head: Mutex<Option<(Option<Head>, AccountState)>>,
+    /// Held for the whole of a library index change. Changes on one device are queued here
+    /// rather than raced: two at once both built on the same index and head, every save but one
+    /// conflicted, and a phone deleting a few files in parallel exhausted the retries ("the
+    /// account head kept changing"). Other devices' changes are still merged by retrying.
+    index_lock: Mutex<()>,
 }
 
 /// A node in the pool, as seen right now.
@@ -277,6 +282,7 @@ impl Session {
             conns: Mutex::new(HashMap::new()),
             down: std::sync::Mutex::new(HashMap::new()),
             head: Mutex::new(None),
+            index_lock: Mutex::new(()),
         })
     }
 

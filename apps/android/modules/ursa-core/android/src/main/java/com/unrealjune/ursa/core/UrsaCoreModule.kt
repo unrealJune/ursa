@@ -209,6 +209,13 @@ class UrsaCoreModule : Module() {
       Unit
     }
 
+    /** Several files in one library change: one index upload and one head save for all of them. */
+    AsyncFunction("deleteMany") Coroutine { fileIds: List<String> ->
+      call { core.deleteMany(fileIds) }
+      fileIds.forEach { File(context.cacheDir, "files/$it").deleteRecursively() }
+      Unit
+    }
+
     AsyncFunction("repair") Coroutine { task: String ->
       call {
         val r = core.repair(progress(task))

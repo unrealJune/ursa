@@ -94,6 +94,7 @@ impl Session {
     /// Applies `change` to the index and saves it, merging with concurrent changes: if the head
     /// moved under us, the change is re-applied to the newer index.
     async fn change_index(&self, change: impl Fn(&mut LibraryIndex)) -> Result<()> {
+        let _queued = self.index_lock.lock().await;
         for _ in 0..5 {
             let before = self.state().await.index.as_ref().map(|r| r.id);
             let mut idx = self.index().await?;
@@ -313,8 +314,25 @@ impl Session {
 
     /// Removes a file from the library. Its shards stay until compaction exists.
     pub async fn delete(&self, file_id: &str) -> Result<()> {
-        let id: ObjectId = file_id.parse().map_err(|e| anyhow!("{e}"))?;
-        self.change_index(move |idx| idx.delete(id)).await
+        self.delete_many(&[file_id]).await
+    }
+
+    /// Removes several files in one index change: one index upload and one head save however
+    /// many there are, where deleting them one by one wrote the whole index once per file.
+    pub async fn delete_many(&self, file_ids: &[&str]) -> Result<()> {
+        let ids = file_ids
+            .iter()
+            .map(|f| f.parse::<ObjectId>().map_err(|e| anyhow!("{f}: {e}")))
+            .collect::<Result<Vec<_>>>()?;
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.change_index(move |idx| {
+            for id in &ids {
+                idx.delete(*id);
+            }
+        })
+        .await
     }
 
     /// Checks every object of every file, rebuilds missing shards onto live nodes, rewrites the

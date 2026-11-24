@@ -101,6 +101,8 @@ declare class UrsaCoreModule extends NativeModule<Events> {
   /** Opens a downloaded file in the app that handles its type. */
   open(fileUri: string, mime: string): void;
   delete(fileId: string): Promise<void>;
+  /** Several files in one library change (one index upload, one head save). */
+  deleteMany(fileIds: string[]): Promise<void>;
   repair(task: string): Promise<RepairReport>;
   signOut(): Promise<void>;
 }
