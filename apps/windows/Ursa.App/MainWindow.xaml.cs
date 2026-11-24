@@ -23,6 +23,28 @@ public sealed partial class MainWindow : Window
         if (File.Exists(icon)) AppWindow.SetIcon(icon);
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1280, 840));
         Nav.SelectedItem = PhotosItem;
+        App.Library.AccountChanged += () => DispatcherQueue.TryEnqueue(ShowLibraryIfReady);
+    }
+
+    /// <summary>Onboarding until the account exists and owns a node; the library after.</summary>
+    public void ShowLibraryIfReady()
+    {
+        bool onboarding = App.Library.IsReady && (!App.Library.HasAccount || App.Library.NeedsNode);
+        if (onboarding)
+        {
+            Nav.Visibility = Visibility.Collapsed;
+            OnboardingFrame.Visibility = Visibility.Visible;
+            OnboardingFrame.Navigate(typeof(OnboardingPage), null, new EntranceNavigationTransitionInfo());
+            AppTitleBar.IsPaneToggleButtonVisible = false;
+        }
+        else
+        {
+            OnboardingFrame.Visibility = Visibility.Collapsed;
+            OnboardingFrame.Content = null;
+            Nav.Visibility = Visibility.Visible;
+            AppTitleBar.IsPaneToggleButtonVisible = true;
+            if (ContentFrame.Content is GalleryPage g) g.Refresh();
+        }
     }
 
     public IntPtr Hwnd => WinRT.Interop.WindowNative.GetWindowHandle(this);

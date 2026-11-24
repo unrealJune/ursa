@@ -17,22 +17,26 @@ public static class LocalStore
     private static readonly byte[] AccountEntropy = Encoding.UTF8.GetBytes("ursa account key v1");
     private static readonly byte[] TokenEntropy = Encoding.UTF8.GetBytes("ursa relay token v1");
 
-    /// <summary>
-    /// The account key: made on first run, then kept DPAPI-protected. Losing it loses the
-    /// library, which is why Settings offers to show it for safekeeping.
-    /// </summary>
-    public static string AccountKeyHex()
+    private static string AccountKeyPath => Path.Combine(Root, "account.key");
+
+    /// <summary>The account root (hex), DPAPI-protected for this Windows user; null before onboarding.</summary>
+    public static string? LoadAccountKey()
+    {
+        if (!File.Exists(AccountKeyPath)) return null;
+        byte[] key = ProtectedData.Unprotect(File.ReadAllBytes(AccountKeyPath), AccountEntropy, DataProtectionScope.CurrentUser);
+        return Convert.ToHexStringLower(key);
+    }
+
+    public static void SaveAccountKey(string hex)
     {
         Directory.CreateDirectory(Root);
-        string path = Path.Combine(Root, "account.key");
-        if (File.Exists(path))
-        {
-            byte[] key = ProtectedData.Unprotect(File.ReadAllBytes(path), AccountEntropy, DataProtectionScope.CurrentUser);
-            return Convert.ToHexStringLower(key);
-        }
-        byte[] fresh = RandomNumberGenerator.GetBytes(32);
-        File.WriteAllBytes(path, ProtectedData.Protect(fresh, AccountEntropy, DataProtectionScope.CurrentUser));
-        return Convert.ToHexStringLower(fresh);
+        File.WriteAllBytes(AccountKeyPath, ProtectedData.Protect(Convert.FromHexString(hex), AccountEntropy, DataProtectionScope.CurrentUser));
+    }
+
+    /// <summary>Signing out of this PC: the library stays on the nodes; only this copy of the key goes.</summary>
+    public static void ForgetAccountKey()
+    {
+        if (File.Exists(AccountKeyPath)) File.Delete(AccountKeyPath);
     }
 
     public sealed class Settings
