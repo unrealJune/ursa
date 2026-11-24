@@ -1,8 +1,11 @@
 import Constants from 'expo-constants';
 import { router } from 'expo-router';
+import * as Clipboard from 'expo-clipboard';
+import { useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 
 import { useUrsa } from '@/core/store';
+import { telemetryEnabled, telemetryId } from '@/core/telemetry';
 import { shortId } from '@/format';
 import { useTheme } from '@/theme';
 import { Divider, Group, Icon, ListRow, Page, SectionHeader, Switch, TopBar, Txt } from '@/ui/kit';
@@ -10,6 +13,10 @@ import { Divider, Group, Icon, ListRow, Page, SectionHeader, Switch, TopBar, Txt
 export default function Account() {
   const { status, prefs, setPrefs, signOut, items } = useUrsa();
   const { c } = useTheme();
+  const [telemetry, setTelemetry] = useState<string | null>(null);
+  useEffect(() => {
+    if (telemetryEnabled) telemetryId().then(setTelemetry);
+  }, []);
   if (!status) return null;
   const name = status.name || 'Your account';
   const friends = status.friends.length;
@@ -62,6 +69,17 @@ export default function Account() {
           <ListRow icon="smartphone" title="Device id" subtitle={shortId(status.deviceId)} />
           <Divider inset={56} />
           <ListRow icon="info-outline" title="Version" subtitle={Constants.expoConfig?.version ?? ''} />
+          {telemetryEnabled && telemetry ? (
+            <>
+              <Divider inset={56} />
+              <ListRow
+                icon="monitor-heart"
+                title="Telemetry ID"
+                subtitle={`${telemetry} · this build sends diagnostics to its developer`}
+                onPress={() => Clipboard.setStringAsync(telemetry)}
+              />
+            </>
+          ) : null}
           <Divider inset={56} />
           <ListRow
             icon="logout"

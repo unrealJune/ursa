@@ -234,9 +234,16 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <StackPanel>
-                        <TextBlock Text="Device ID" />
-                        <TextBlock Text="{x:Bind Short(Library.DeviceId), Mode=OneWay}" FontFamily="Consolas" IsTextSelectionEnabled="True" Style="{StaticResource Hint}" />
+                    <StackPanel Spacing="8">
+                        <StackPanel>
+                            <TextBlock Text="Device ID" />
+                            <TextBlock Text="{x:Bind Short(Library.DeviceId), Mode=OneWay}" FontFamily="Consolas" IsTextSelectionEnabled="True" Style="{StaticResource Hint}" />
+                        </StackPanel>
+                        <StackPanel Visibility="{x:Bind services:Telemetry.Enabled}">
+                            <TextBlock Text="Telemetry ID" />
+                            <TextBlock Text="{x:Bind services:Telemetry.Id}" FontFamily="Consolas" IsTextSelectionEnabled="True" Style="{StaticResource Hint}" />
+                            <TextBlock Text="This build sends diagnostics to its developer." Style="{StaticResource Hint}" />
+                        </StackPanel>
                     </StackPanel>
                     <Button Grid.Column="1" Content="Open data folder" Click="OnOpenData" VerticalAlignment="Center" />
                 </Grid>

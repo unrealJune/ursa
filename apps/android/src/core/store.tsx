@@ -5,6 +5,7 @@ import { AppState } from 'react-native';
 import { type AccountKeys, errorText, type LibraryItem, type Status, Ursa, type UploadMeta, withProgress } from 'ursa-core';
 
 import { accountKey, loadPrefs, type Prefs, relayToken, savePrefs } from './settings';
+import { log, startTelemetry } from './telemetry';
 import { forgetThumbs } from './thumbs';
 
 /**
@@ -105,15 +106,18 @@ export function UrsaProvider({ children }: { children: ReactNode }) {
     setProblem(null);
     setStatus(null);
     try {
+      await startTelemetry();
       const [p, key, token] = await Promise.all([loadPrefs(), accountKey.get(), relayToken.get()]);
       setPrefsState(p);
       setHadKey(!!key);
       const st = await Ursa.init(key, p.relays, token);
       setStatus(st);
       setProblem(st.openError);
+      if (st.openError) log('WARN', `start: the account did not open: ${st.openError}`);
     } catch (e) {
       setFailed(true);
       setProblem(errorText(e));
+      log('ERROR', `start failed: ${errorText(e)}`);
     }
   }, []);
 
@@ -122,6 +126,7 @@ export function UrsaProvider({ children }: { children: ReactNode }) {
   }, [start]);
 
   const phase: Phase = failed ? 'failed' : phaseOf(status, hadKey);
+  useEffect(() => log('INFO', `phase: ${phase}`, { phase }), [phase]);
 
   const refreshStatus = useCallback(async () => {
     setStatus(await Ursa.status());
@@ -138,6 +143,7 @@ export function UrsaProvider({ children }: { children: ReactNode }) {
       setLibError(null);
     } catch (e) {
       setLibError(errorText(e));
+      log('WARN', `library: ${errorText(e)}`);
     } finally {
       setLibLoading(false);
     }
@@ -218,6 +224,7 @@ export function UrsaProvider({ children }: { children: ReactNode }) {
           setUploads((u) => ({ ...u, done: u.done + 1 }));
         } catch (e) {
           setUploads((u) => ({ ...u, failed: u.failed + 1, lastError: `${name}: ${errorText(e)}` }));
+          log('WARN', `upload failed: ${errorText(e)}`, { mime: job.meta.mime });
         }
       }
     } finally {
@@ -282,6 +289,7 @@ export function UrsaProvider({ children }: { children: ReactNode }) {
       enqueue(fresh);
     } catch (e) {
       setUploads((u) => ({ ...u, lastError: errorText(e) }));
+      log('WARN', `backup scan failed: ${errorText(e)}`);
     } finally {
       setBackupScanning(false);
     }
