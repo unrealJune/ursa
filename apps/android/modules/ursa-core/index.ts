@@ -18,7 +18,13 @@ export type Status = {
   openError: string | null;
 };
 
-export type AccountKeys = { accountId: string; accountKey: string };
+export type AccountKeys = {
+  accountId: string;
+  accountKey: string;
+  /** After a link: the other device's relays (and token), which the core now runs on. Keep them. */
+  relays?: string[] | null;
+  relayToken?: string | null;
+};
 
 export type LibraryItem = {
   fileId: string;

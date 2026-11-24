@@ -270,11 +270,17 @@ async fn run(cli: &Cli, device: &Arc<Device>, platform: &str) -> Result<()> {
             if root_path(&cli.profile).exists() {
                 bail!("this profile already has an account");
             }
-            let (root, s) = device
+            let linked = device
                 .join(code, &cli.device_name, platform, |c| eprintln!("Confirmation code: {c} (check it matches the other device)"))
                 .await?;
-            save_root(&cli.profile, &root)?;
-            println!("{}", s.account_id());
+            save_root(&cli.profile, &linked.root)?;
+            // The CLI takes its relays from its flags each run; say so when the other device's differ.
+            if let Some(n) = &linked.network
+                && !n.relays.is_empty()
+            {
+                eprintln!("The other device uses these relays (pass them with --relay next time): {}", n.relays.join(", "));
+            }
+            println!("{}", linked.session.account_id());
         }
         Cmd::ExportKey { path, passphrase } => {
             let account = Account::from_root(load_root(&cli.profile)?);

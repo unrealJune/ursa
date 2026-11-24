@@ -253,9 +253,16 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
             let device = host.device().await?;
             let (dn, pf) = host.names.lock().await.clone();
             let o = out.clone();
-            let (_, s) = device.join(&code, &dn, &pf, move |c| o.event("link_confirm", json!({ "code": c }))).await?;
-            let v = Host::account_result(&s);
-            *host.session.lock().await = Some(s);
+            let linked = device.join(&code, &dn, &pf, move |c| o.event("link_confirm", json!({ "code": c }))).await?;
+            let mut v = Host::account_result(&linked.session);
+            // The other device's relays, which this device now runs on: the app keeps them for
+            // its next start. Joining may have restarted the device on them.
+            if let Some(n) = &linked.network {
+                v["relays"] = json!(n.relays);
+                v["relay_token"] = json!(n.relay_token);
+            }
+            *host.device.lock().await = Some(linked.session.device.clone());
+            *host.session.lock().await = Some(linked.session);
             Ok(v)
         }
         Command::LinkOffer => {
