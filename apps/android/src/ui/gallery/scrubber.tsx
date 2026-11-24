@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, StyleSheet, View } from 'react-native';
 import { GestureDetector, usePanGesture } from 'react-native-gesture-handler';
 
-import type { Store } from '@/core/state';
+import { type Store, useStore } from '@/core/state';
 import { monthLabel } from '@/format';
 import { useTheme } from '@/theme';
 import { Icon, Txt } from '@/ui/kit';
@@ -33,7 +33,7 @@ export function Scrubber({
   onScrollTo: (y: number) => void;
 }) {
   const { c } = useTheme();
-  const y = scroll.use((s) => s.y);
+  const y = useStore(scroll, (s) => s.y);
   const [dragging, setDragging] = useState(false);
   const [shown, setShown] = useState(false);
   const [opacity] = useState(() => new Animated.Value(0));

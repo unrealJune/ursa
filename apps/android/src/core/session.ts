@@ -1,7 +1,7 @@
 import { type AccountKeys, errorText, type Status, Ursa } from 'ursa-core';
 
 import { accountKey, DEFAULT_PREFS, loadPrefs, type Prefs, relayToken, savePrefs } from './settings';
-import { createStore, singleFlight, sleep } from './state';
+import { createStore, singleFlight, sleep, useStore } from './state';
 import { log, startTelemetry } from './telemetry';
 
 /**
@@ -30,7 +30,9 @@ type SessionState = {
 
 export const session = createStore<SessionState>({ phase: 'starting', status: null, problem: null, prefs: DEFAULT_PREFS, retryAt: null });
 
-export const useSession = session.use;
+export function useSession<U>(select: (s: SessionState) => U): U {
+  return useStore(session, select);
+}
 
 /** Whether this phone has an account root stored (so a closed account means offline). */
 let hasKey = false;

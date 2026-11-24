@@ -9,8 +9,6 @@ export type Store<T extends object> = {
   get(): T;
   set(patch: Partial<T> | ((s: T) => Partial<T>)): void;
   subscribe(listener: () => void): () => void;
-  /** `select` must return state it reads (or a primitive), not a fresh object or array. */
-  use<U>(select: (s: T) => U): U;
 };
 
 export function createStore<T extends object>(initial: T): Store<T> {
@@ -37,11 +35,20 @@ export function createStore<T extends object>(initial: T): Store<T> {
         listeners.delete(listener);
       };
     },
-    use(select) {
-      return useSyncExternalStore(store.subscribe, () => select(state));
-    },
   };
   return store;
+}
+
+/**
+ * Reads a slice of a store and re-renders when it changes. `select` must return state it reads
+ * (or a primitive), not a fresh object or array.
+ *
+ * A standalone hook, not a `store.use(...)` method: the React Compiler takes any call named `use`
+ * for React's own `use()`, which may be called conditionally, and compiled the store's hook into
+ * a conditional call, so the Account tab crashed with "Cannot read property 'next' of undefined".
+ */
+export function useStore<T extends object, U>(store: Store<T>, select: (s: T) => U): U {
+  return useSyncExternalStore(store.subscribe, () => select(store.get()));
 }
 
 /** Calls `fn` with each new value `select` returns (not the current one). */
