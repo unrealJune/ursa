@@ -4071,6 +4071,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "ursa-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+ "ursa-client",
+ "ursa-core",
+]
+
+[[package]]
+name = "ursa-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "iroh",
+ "iroh-dns",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+ "ursa-core",
+ "ursa-proto",
+]
+
+[[package]]
 name = "ursa-core"
 version = "0.1.0"
 dependencies = [
@@ -4105,6 +4138,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ursa-client",
  "ursa-core",
  "ursa-proto",
 ]
@@ -4135,11 +4169,16 @@ name = "ursa-proto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "getrandom 0.3.4",
+ "hex",
  "iroh",
  "iroh-tickets",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "ursa-core",
 ]
 
