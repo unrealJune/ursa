@@ -88,6 +88,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A hosted runner's root disk has ~20 GB free, and this job fills it from both ends: the
+      # restored caches (Cargo target, Gradle, ccache) and then the Rust core, the CMake trees and
+      # Gradle's intermediates. The first build with the caches on died in Gradle with "No space
+      # left on device". These toolchains ship on the image and nothing here uses them. This runs
+      # before the restores, so they unpack into the space it frees.
+      - name: Free disk space
+        run: |
+          df -h /
+          for path in /usr/share/dotnet /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/share/powershell /usr/share/swift; do
+            [[ -e "$path" ]] && sudo rm -rf -- "$path" &
+          done
+          wait
+          df -h /
+
       - name: Rust
         id: rust
         run: |
