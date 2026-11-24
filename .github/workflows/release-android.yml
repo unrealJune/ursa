@@ -6,13 +6,24 @@ name: Release / Android app
 # something (scripts/next-version.sh android) and attaches the APK to that GitHub release. Other
 # builds keep the APK as a workflow artifact.
 #
+# Caches: GitHub only lets a run read caches saved on its own ref, its base branch or the default
+# branch, so whatever a pull request saves is readable by that pull request alone, while still
+# counting against the repository's 10 GB and evicting the shared entries. As on Street Cryptid,
+# the branches pull requests are based on do the saving (every push to main or android-app builds
+# and saves, which is the cache warming), and pull-request builds only restore. The one exception
+# is the built core: it is small, and a pull request's next push reuses it when no crate changed.
+# The Rust target, ccache and Gradle keys leave the ABIs out: a release (arm64-v8a and x86_64)
+# fills a superset of what an arm64-only pull-request build reads.
+#
 # Signing: with the ANDROID_KEYSTORE_B64 secret (plus ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS
 # and ANDROID_KEY_PASSWORD) the APK is signed with that key; without it, with the Expo template's
 # debug key. Android only installs an update signed by the same key as the installed app.
 
 on:
   push:
-    branches: [main]
+    # main releases; android-app (where the app lives until it merges) only warms the caches its
+    # pull requests read.
+    branches: [main, android-app]
     paths:
       - apps/android/**
       - crates/**
@@ -82,9 +93,13 @@ jobs:
       # Developer telemetry: the JS layer and the Rust core send their logs as OTLP to the
       # collector this repository variable names (src/core/telemetry.ts). Unset sends nothing.
       EXPO_PUBLIC_OTEL_ENDPOINT: ${{ vars.OTEL_ENDPOINT }}
-      # A pull-request build only has to install on a test phone, and those are arm64; x86_64 is
-      # for emulators and doubled both the Rust and the C++ work. Releases ship both.
-      ABIS: ${{ github.event_name == 'pull_request' && 'arm64-v8a' || 'arm64-v8a x86_64' }}
+      # Anything but main builds for a test phone: arm64 only (x86_64 is for emulators and doubled
+      # both the Rust and the C++ work) and no R8. Releases ship both ABIs, shrunk.
+      FAST: ${{ github.ref != 'refs/heads/main' }}
+      ABIS: ${{ github.ref != 'refs/heads/main' && 'arm64-v8a' || 'arm64-v8a x86_64' }}
+      # Pull requests restore what their base branch (or main) saved and save nothing of their
+      # own but the built core.
+      SAVE_CACHES: ${{ github.event_name != 'pull_request' }}
       # Gradle reuses task outputs across runs only with its build cache on (setup-gradle saves
       # ~/.gradle/caches/build-cache-1 with the rest of Gradle's home).
       GRADLE_OPTS: -Dorg.gradle.caching=true -Dorg.gradle.parallel=true -Dorg.gradle.jvmargs=-Xmx5g
@@ -127,7 +142,9 @@ jobs:
 
       # The built core: the library and its bindings, together (UniFFI aborts at load when the
       # two disagree, so neither is ever restored without the other). Keyed by everything the
-      # build reads, so a hit skips the Rust build entirely and a miss rebuilds from scratch.
+      # build reads, so a hit skips the Rust build entirely and a miss rebuilds from scratch. An
+      # arm64-only build also takes a release's core built from the same sources (its ABIs are a
+      # superset); a release never takes an arm64-only one.
       - name: Restore the built core
         id: core
         uses: actions/cache/restore@v4
@@ -135,21 +152,28 @@ jobs:
           path: |
             apps/android/modules/ursa-core/android/src/main/jniLibs
             apps/android/modules/ursa-core/android/src/main/java/uniffi
-          key: ursa-core-${{ env.ABIS }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh') }}
+          key: ursa-core-${{ steps.rust.outputs.rustc }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh') }}-${{ env.ABIS }}
+          restore-keys: ${{ env.FAST == 'true' && format('ursa-core-{0}-{1}-', steps.rust.outputs.rustc, hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh')) || '' }}
+      - name: Is the core cached
+        id: have
+        env:
+          MATCHED: ${{ steps.core.outputs.cache-matched-key }}
+        run: echo "core=$([[ -n "$MATCHED" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Rust targets
-        if: steps.core.outputs.cache-hit != 'true'
+        if: steps.have.outputs.core != 'true'
         run: rustup target add aarch64-linux-android x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
-        if: steps.core.outputs.cache-hit != 'true'
+        if: steps.have.outputs.core != 'true'
         with:
-          key: android-${{ env.ABIS }}
+          key: android
+          save-if: ${{ env.SAVE_CACHES == 'true' }}
       - uses: taiki-e/install-action@v2
-        if: steps.core.outputs.cache-hit != 'true'
+        if: steps.have.outputs.core != 'true'
         with:
           tool: cargo-ndk
       - name: Build the core and its Kotlin bindings
-        if: steps.core.outputs.cache-hit != 'true'
+        if: steps.have.outputs.core != 'true'
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           # shellcheck disable=SC2086
@@ -157,7 +181,7 @@ jobs:
       # Saved at once, not at the end of the job: a build that dies later (it has, twice) would
       # otherwise leave nothing behind, and the next one would build the core again.
       - name: Save the built core
-        if: steps.core.outputs.cache-hit != 'true'
+        if: steps.have.outputs.core != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -170,11 +194,11 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      # Pull requests save too (by default only the default branch does), so a pull request's
-      # second build finds its first one's task outputs.
+      # By default only the default branch saves; android-app must too, since its pull requests
+      # read from it. Pull requests only read.
       - uses: gradle/actions/setup-gradle@v4
         with:
-          cache-read-only: false
+          cache-read-only: ${{ env.SAVE_CACHES != 'true' }}
 
       # React Native's libraries build their C++ through CMake (the `buildCMake*` tasks), which
       # Gradle's build cache does not cover. CMake takes its compiler launcher from the
@@ -197,15 +221,17 @@ jobs:
             echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
           } >> "$GITHUB_ENV"
-      # A new entry every run (an exact hit never saves, so a fixed key would freeze), restored
-      # from the newest one: this pull request's last build, or main's.
-      - uses: actions/cache@v4
+      # A new entry every saving run (an exact hit never saves, so a fixed key would freeze),
+      # restored from the newest one the base branch or main saved.
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
-          key: ursa-ccache-${{ env.ABIS }}-${{ hashFiles('apps/android/bun.lock') }}-${{ github.run_id }}
+          key: ursa-ccache-${{ hashFiles('apps/android/bun.lock') }}-${{ github.run_id }}
           restore-keys: |
-            ursa-ccache-${{ env.ABIS }}-${{ hashFiles('apps/android/bun.lock') }}-
-            ursa-ccache-${{ env.ABIS }}-
+            ursa-ccache-${{ hashFiles('apps/android/bun.lock') }}-
+            ursa-ccache-
       - run: ccache --zero-stats > /dev/null
 
       - name: Install and check the app
@@ -240,12 +266,12 @@ jobs:
         run: |
           # Only the ABIs the core was built for.
           archs="$(tr ' ' ',' <<<"$ABIS")"
-          # R8 was 5 of a warm pull-request build's 9 minutes, and nothing caches it. A pull
-          # request's APK is for a test phone, so it skips R8 and resource shrinking; anything
-          # built for a release (main, or a dispatch) still runs both, so the keep rules are
-          # exercised before an APK ships.
+          # R8 was 5 of a warm pull-request build's 9 minutes, and nothing caches it. An APK built
+          # off main is for a test phone, so it skips R8 and resource shrinking; anything built on
+          # main (a release, or a dispatch) still runs both, so the keep rules are exercised
+          # before an APK ships.
           shrink=()
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+          if [[ "$FAST" == "true" ]]; then
             shrink=(-Pandroid.enableMinifyInReleaseBuilds=false -Pandroid.enableShrinkResourcesInReleaseBuilds=false)
           fi
           ./gradlew :app:assembleRelease --no-daemon --build-cache -PreactNativeArchitectures="$archs" "${shrink[@]}"
@@ -254,6 +280,13 @@ jobs:
       - name: ccache statistics
         if: '!cancelled()'
         run: ccache --show-stats || true
+      # Saved even after a failed build, so what it compiled still warms the next one.
+      - name: Save ccache
+        if: ${{ !cancelled() && env.SAVE_CACHES == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
 
       - name: Check the core shipped
         run: |
