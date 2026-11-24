@@ -1,99 +1,149 @@
-import { FlashList } from '@shopify/flash-list';
-import { Image } from 'expo-image';
-import { router } from 'expo-router';
-import { memo, useMemo } from 'react';
-import { Pressable, RefreshControl, StyleSheet, useWindowDimensions, View } from 'react-native';
-import type { LibraryItem } from 'ursa-core';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
+import { Alert, BackHandler, useWindowDimensions, View } from 'react-native';
+import { errorText } from 'ursa-core';
 
+import { shareFile } from '@/core/files';
+import { loadLibrary, removeMany, saveMany, useLibrary } from '@/core/library';
 import { pickAndUpload } from '@/core/pick';
-import { useUrsa } from '@/core/store';
-import { useThumb } from '@/core/thumbs';
-import { dayKey, dayLabel, isMedia } from '@/format';
+import { setPrefs, useSession } from '@/core/session';
+import { isMedia } from '@/format';
 import { useTheme } from '@/theme';
-import { Button, Empty, Icon, IconButton, Notice, TopBar, Txt } from '@/ui/kit';
-import { BackupButton, UploadStrip } from '@/ui/upload-status';
+import { Grid, type Selection } from '@/ui/gallery/grid';
+import { Button, Empty, IconButton, Notice, TopBar } from '@/ui/kit';
+import { BackupButton, BulkStrip, UploadStrip } from '@/ui/upload-status';
 
-const GAP = 2;
-
-type Row = { type: 'header'; key: string; label: string } | { type: 'row'; key: string; items: LibraryItem[] };
-
-/** Day headers and rows of `columns` thumbnails, newest first. */
-function layout(items: LibraryItem[], columns: number): Row[] {
-  const rows: Row[] = [];
-  let day = '';
-  let row: LibraryItem[] = [];
-  const flush = () => {
-    if (row.length) rows.push({ type: 'row', key: `r-${row[0].fileId}`, items: row });
-    row = [];
-  };
-  for (const item of items) {
-    const k = dayKey(item.createdMs);
-    if (k !== day) {
-      flush();
-      day = k;
-      rows.push({ type: 'header', key: `h-${k}`, label: dayLabel(item.createdMs) });
-    }
-    row.push(item);
-    if (row.length === columns) flush();
-  }
-  flush();
-  return rows;
-}
+const NONE: Selection = new Set();
 
 export default function Photos() {
-  const { items, libLoading, libError, refreshLibrary, enqueue, prefs } = useUrsa();
+  const items = useLibrary((s) => s.items);
+  const loading = useLibrary((s) => s.loading);
+  const loaded = useLibrary((s) => s.loaded);
+  const error = useLibrary((s) => s.error);
+  const busy = useLibrary((s) => s.bulk !== null);
+  const backup = useSession((s) => s.prefs.backup);
+  const zoom = useSession((s) => s.prefs.gridZoom);
   const { c } = useTheme();
   const { width } = useWindowDimensions();
-  const columns = width >= 900 ? 7 : width >= 600 ? 5 : 4;
-  const size = (width - GAP * (columns - 1)) / columns;
   const media = useMemo(() => items.filter((i) => isMedia(i.mime)), [items]);
-  const rows = useMemo(() => layout(media, columns), [media, columns]);
+  const [picked, setPicked] = useState<Selection>(NONE);
+
+  // Only what is still in the library (a delete, or another device's, may have taken some).
+  const selected = useMemo(() => {
+    if (picked.size === 0) return NONE;
+    const ids = new Set(media.map((i) => i.fileId));
+    const kept = [...picked].filter((id) => ids.has(id));
+    return kept.length === picked.size ? picked : new Set(kept);
+  }, [picked, media]);
+  const selecting = selected.size > 0;
+  const chosen = () => media.filter((i) => selected.has(i.fileId));
+  const clear = () => setPicked(NONE);
+
+  // Back leaves selection before it leaves the screen.
+  useFocusEffect(
+    useCallback(() => {
+      if (!selecting) return;
+      const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+        setPicked(NONE);
+        return true;
+      });
+      return () => sub.remove();
+    }, [selecting]),
+  );
+
+  const refresh = () => loadLibrary({ fromNodes: true });
+
+  const save = async () => {
+    const list = chosen();
+    clear();
+    await saveMany(list);
+  };
+
+  const share = async () => {
+    const [one] = chosen();
+    if (!one) return;
+    try {
+      await shareFile(one);
+      clear();
+    } catch (e) {
+      Alert.alert('Could not share', errorText(e));
+    }
+  };
+
+  const del = () => {
+    const list = chosen();
+    const n = list.length;
+    Alert.alert(n === 1 ? 'Delete this item?' : `Delete ${n} items?`, `${n === 1 ? 'It is' : 'They are'} removed from every device and node. This cannot be undone.`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          clear();
+          await removeMany(list);
+        },
+      },
+    ]);
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: c.surface }}>
-      <TopBar
-        title="Photos"
-        actions={
-          <>
-            <IconButton icon="add-photo-alternate" label="Upload photos" onPress={() => pickAndUpload(enqueue)} />
-            <BackupButton />
-          </>
-        }
-      />
+      {selecting ? (
+        <TopBar
+          title={`${selected.size} selected`}
+          background={c.surfaceContainer}
+          leading={<IconButton icon="close" label="Clear selection" onPress={clear} />}
+          actions={
+            <>
+              {selected.size < media.length ? <IconButton icon="select-all" label="Select all" onPress={() => setPicked(new Set(media.map((i) => i.fileId)))} /> : null}
+              {selected.size === 1 ? <IconButton icon="share" label="Share" onPress={share} /> : null}
+              {!busy ? <IconButton icon="download" label="Save to this phone" onPress={save} /> : null}
+              {!busy ? <IconButton icon="delete-outline" label="Delete" onPress={del} /> : null}
+            </>
+          }
+        />
+      ) : (
+        <TopBar
+          title="Photos"
+          actions={
+            <>
+              <IconButton icon="add-photo-alternate" label="Upload photos" onPress={pickAndUpload} />
+              <BackupButton />
+            </>
+          }
+        />
+      )}
       <UploadStrip />
-      {libError ? (
+      <BulkStrip />
+      {error ? (
         <View style={{ paddingHorizontal: 16 }}>
-          <Notice tone="error" text={libError} action={<Button label="Try again" kind="text" onPress={refreshLibrary} style={{ alignSelf: 'flex-start' }} />} />
+          <Notice
+            tone="error"
+            text={`Could not reach your nodes, so this may not show the latest from your other devices. ${error}`}
+            action={<Button label="Try again" kind="text" onPress={refresh} style={{ alignSelf: 'flex-start' }} />}
+          />
         </View>
       ) : null}
-      <FlashList
-        data={rows}
-        keyExtractor={(r) => r.key}
-        getItemType={(r) => r.type}
-        refreshControl={<RefreshControl refreshing={libLoading} onRefresh={refreshLibrary} colors={[c.primary]} progressBackgroundColor={c.surfaceContainerHigh} />}
-        renderItem={({ item: r }) =>
-          r.type === 'header' ? (
-            <Txt role="titleSmall" style={{ paddingHorizontal: 16, paddingTop: 20, paddingBottom: 10 }}>
-              {r.label}
-            </Txt>
-          ) : (
-            <View style={{ flexDirection: 'row', gap: GAP, marginBottom: GAP }}>
-              {r.items.map((item) => (
-                <Cell key={item.fileId} item={item} size={size} />
-              ))}
-            </View>
-          )
-        }
-        ListEmptyComponent={
-          libLoading ? null : (
+      <Grid
+        items={media}
+        width={width}
+        zoom={zoom}
+        onZoom={(z) => setPrefs({ gridZoom: z })}
+        selected={selected}
+        onSelect={setPicked}
+        onOpen={(item) => router.push({ pathname: '/viewer', params: { id: item.fileId } })}
+        refreshing={loading && loaded}
+        onRefresh={refresh}
+        empty={
+          !loaded ? null : (
             <Empty
               icon="photo-library"
               title="No photos yet"
-              body={prefs.backup ? 'New photos on this phone are backed up while Ursa is open.' : 'Back up this phone’s photos, or pick some to upload.'}
+              body={backup ? 'New photos on this phone are backed up while Ursa is open.' : 'Back up this phone’s photos, or pick some to upload.'}
               action={
                 <View style={{ gap: 8, marginTop: 8 }}>
-                  {!prefs.backup ? <Button label="Turn on backup" icon="cloud-upload" onPress={() => router.push('/backup')} /> : null}
-                  <Button label="Upload photos" kind="tonal" icon="add-photo-alternate" onPress={() => pickAndUpload(enqueue)} />
+                  {!backup ? <Button label="Turn on backup" icon="cloud-upload" onPress={() => router.push('/backup')} /> : null}
+                  <Button label="Upload photos" kind="tonal" icon="add-photo-alternate" onPress={pickAndUpload} />
                 </View>
               }
             />
@@ -103,29 +153,3 @@ export default function Photos() {
     </View>
   );
 }
-
-const Cell = memo(function Cell({ item, size }: { item: LibraryItem; size: number }) {
-  const { c } = useTheme();
-  const uri = useThumb(item.fileId, item.hasThumb);
-  const video = item.mime.startsWith('video/');
-  return (
-    <Pressable
-      onPress={() => router.push({ pathname: '/viewer', params: { id: item.fileId } })}
-      style={{ width: size, height: size, backgroundColor: c.surfaceContainerHigh }}
-      accessibilityLabel={item.name}
-    >
-      {uri ? (
-        <Image source={{ uri }} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} recyclingKey={item.fileId} />
-      ) : !item.hasThumb ? (
-        <View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]}>
-          <Icon name={video ? 'movie' : 'image'} color={c.onSurfaceVariant} />
-        </View>
-      ) : null}
-      {video ? (
-        <View style={{ position: 'absolute', top: 6, right: 6 }}>
-          <Icon name="play-circle-filled" size={20} color="#FFFFFF" />
-        </View>
-      ) : null}
-    </Pressable>
-  );
-});

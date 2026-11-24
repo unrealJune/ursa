@@ -5,7 +5,7 @@ import { Alert, Share, View } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 import { errorText, Ursa } from 'ursa-core';
 
-import { useUrsa } from '@/core/store';
+import { refreshStatus } from '@/core/session';
 import { useTheme } from '@/theme';
 import { Button, Loading, Notice, Page, Txt } from '@/ui/kit';
 
@@ -14,7 +14,6 @@ import { Button, Loading, Notice, Page, Txt } from '@/ui/kit';
  * the new device shows before it gets the account.
  */
 export default function AddDevice() {
-  const { refreshStatus } = useUrsa();
   const { c } = useTheme();
   const [code, setCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -49,7 +48,7 @@ export default function AddDevice() {
       subs.forEach((s) => s.remove());
       if (!finished.current) Ursa.linkCancel();
     };
-  }, [refreshStatus]);
+  }, []);
 
   return (
     <Page>

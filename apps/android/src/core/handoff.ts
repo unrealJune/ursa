@@ -15,3 +15,8 @@ export function deliverScan(code: string): boolean {
   r(code);
   return true;
 }
+
+/** The scanner closed without a code: nothing is waiting any more. */
+export function cancelScan() {
+  receiver = null;
+}

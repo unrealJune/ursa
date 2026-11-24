@@ -29,9 +29,18 @@ a push to main with a `feat`/`fix` touching the app or the core releases `androi
 
 ## How it is put together
 
-- `src/core/store.tsx`: the app's state. Starts the core with the stored root, decides the phase
-  (onboarding, offline, ready), keeps the library list and the upload queue, and runs camera-roll
-  backup while the app is open.
+- `src/core/`: the app's state, as small external stores (`state.ts`) that components read with
+  selectors, so an upload's progress re-renders the strip that shows it and nothing else.
+  `session.ts` starts the core with the stored root and decides the phase (onboarding, offline,
+  ready), retrying quietly while the nodes are out of reach; `library.ts` holds the file list and
+  batches (delete, save); `uploads.ts` the upload queue and camera-roll backup; `lifecycle.ts`
+  ties them together and to the app coming back on screen.
+- `src/app/_layout.tsx`: one screen per phase, behind `Stack.Protected` guards. `starting` is the
+  only unguarded screen, so a phase change always falls back to it and it forwards to the phase's
+  start (before, the fallback could be the QR scanner).
+- `src/ui/gallery/`: the photo grid. Pinch to zoom (day groups, then months), hold and drag to
+  select, a date scrubber on the right edge; the whole layout is computed up front (`layout.ts`)
+  so offsets, dates and the item under a finger are lookups, not measurements.
 - `src/core/settings.ts`: the account root and the relay token live in the Android Keystore
   through expo-secure-store; the relays default to the ones the Windows app uses.
 - `src/ui/kit.tsx`: Material 3 pieces. Colours come from the wallpaper (Material You,

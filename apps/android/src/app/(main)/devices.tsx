@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 
-import { useUrsa } from '@/core/store';
+import { useSession } from '@/core/session';
 import { dateTime } from '@/format';
 import { useTheme } from '@/theme';
 import { Button, Divider, Group, ListRow, Page, Txt } from '@/ui/kit';
@@ -13,7 +13,7 @@ function platformIcon(p: string): string {
 }
 
 export default function Devices() {
-  const { status } = useUrsa();
+  const status = useSession((s) => s.status);
   const { c } = useTheme();
   const devices = status?.devices ?? [];
   return (

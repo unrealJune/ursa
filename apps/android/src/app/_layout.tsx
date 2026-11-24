@@ -5,47 +5,39 @@ import * as SystemUI from 'expo-system-ui';
 import { useEffect, useRef } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
-import { type Phase, UrsaProvider, useUrsa } from '@/core/store';
+import { boot } from '@/core/lifecycle';
+import { START } from '@/core/routes';
+import { useSession } from '@/core/session';
 import { useTheme } from '@/theme';
 
 SplashScreen.preventAutoHideAsync();
+boot();
 
 export default function Root() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <UrsaProvider>
-        <Nav />
-      </UrsaProvider>
+      <Nav />
     </GestureHandlerRootView>
   );
 }
 
 /**
- * Where each phase starts. The guards below only hide screens; when the one on show is hidden,
- * expo-router falls back to whatever screen it may still show, and with no onboarding route at
- * `/` that was the unguarded scan screen: a fresh install opened on "Scan a code", with nothing
- * waiting for what it read. Welcome and needs-node share a start, so a step inside onboarding
- * (creating an account, which ends needs-node, then the recovery words) is never interrupted.
+ * The guards below only hide screens. When the screen on show is hidden, the stack falls back to
+ * the first screen it may still show, before the effect below gets to say where to go. That first
+ * screen must be `starting` (which forwards to the phase's start), never the scanner or the
+ * network page: those are guarded too, and listed last. Without that, a phase change (a retry, a
+ * relay change, the account closing) could land on "Scan a code" with nothing waiting for it.
  */
-const START: Record<Phase, Href> = {
-  starting: '/starting',
-  failed: '/problem',
-  offline: '/problem',
-  welcome: '/welcome',
-  'needs-node': '/welcome',
-  ready: '/',
-};
-
 function Nav() {
-  const { phase } = useUrsa();
+  const phase = useSession((s) => s.phase);
   const { c, dark } = useTheme();
   const router = useRouter();
   const ready = useRootNavigationState()?.key;
-  const started = useRef<Href | null>(null);
+  const shown = useRef<Href | null>(null);
 
   useEffect(() => {
-    if (!ready || started.current === START[phase]) return;
-    started.current = START[phase];
+    if (!ready || shown.current === START[phase]) return;
+    shown.current = START[phase];
     router.replace(START[phase]);
   }, [phase, ready, router]);
 
@@ -56,6 +48,7 @@ function Nav() {
     if (phase !== 'starting') SplashScreen.hideAsync();
   }, [phase]);
 
+  const onboarding = phase === 'welcome' || phase === 'needs-node';
   return (
     <>
       <StatusBar style={dark ? 'light' : 'dark'} />
@@ -68,20 +61,22 @@ function Nav() {
           contentStyle: { backgroundColor: c.surface },
         }}
       >
-        <Stack.Protected guard={phase === 'starting'}>
-          <Stack.Screen name="starting" options={{ headerShown: false }} />
-        </Stack.Protected>
+        <Stack.Screen name="starting" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Protected guard={phase === 'failed' || phase === 'offline'}>
-          <Stack.Screen name="problem" options={{ headerShown: false }} />
+          <Stack.Screen name="problem" options={{ headerShown: false, animation: 'fade' }} />
         </Stack.Protected>
-        <Stack.Protected guard={phase === 'welcome' || phase === 'needs-node'}>
-          <Stack.Screen name="(onboarding)" options={{ headerShown: false }} />
+        <Stack.Protected guard={onboarding}>
+          <Stack.Screen name="(onboarding)" options={{ headerShown: false, animation: 'fade' }} />
         </Stack.Protected>
         <Stack.Protected guard={phase === 'ready'}>
-          <Stack.Screen name="(main)" options={{ headerShown: false }} />
+          <Stack.Screen name="(main)" options={{ headerShown: false, animation: 'fade' }} />
         </Stack.Protected>
-        <Stack.Screen name="scan" options={{ title: 'Scan a code', presentation: 'modal' }} />
-        <Stack.Screen name="network" options={{ title: 'Network' }} />
+        <Stack.Protected guard={onboarding || phase === 'ready'}>
+          <Stack.Screen name="scan" options={{ title: 'Scan a code', presentation: 'modal' }} />
+        </Stack.Protected>
+        <Stack.Protected guard={phase !== 'starting'}>
+          <Stack.Screen name="network" options={{ title: 'Network' }} />
+        </Stack.Protected>
       </Stack>
     </>
   );
