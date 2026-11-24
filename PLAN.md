@@ -505,6 +505,83 @@ Behind `ObjectStore`, with no app changes:
   home node of a friend loses nothing of anyone else's, and reads of originals are faster than
   from the home node alone.
 
+### Milestone M2: identities, the pool, and losing a home node (in progress, 2026-11-23)
+
+Pulled forward from Phases 2 and 3 because "what if my node dies?" decides the design. The
+question it answers: **if my home node and its storage are destroyed, can I get every photo
+back with nothing but my recovery key?** Today the answer is no: everything lives on one node.
+
+**Identity** (`ursa-core::account`). The 32-byte root key is the account. Everything else is
+derived from it with BLAKE3 contexts, so the root alone restores all of it:
+
+| Derived | Use |
+| --- | --- |
+| account signing key (Ed25519 + ML-DSA-65, hybrid) | signs device certificates, account heads |
+| account id | the Ed25519 public key; what friends and nodes know you by |
+| locator key (Ed25519, separate context) | signs the account's pkarr record, unlinkable to the account id |
+| X-Wing key | receives wrapped keys (shares, later) |
+| dedup and manifest keys | as before |
+
+**Recovery, offline.** A 24-word BIP-39 phrase of the root, and a key file: the root sealed
+under Argon2id(passphrase) + AES-256-GCM, versioned JSON. Either one restores the account.
+
+**Devices.** A device has its own iroh key and a certificate the account signs (account id,
+device id, name, platform, time). Nodes authorise *accounts*: a device proves membership by
+presenting its certificate on the connection, and the node checks the signature and that the
+certificate names the connection's own endpoint id.
+
+**Adding a device, either direction** (`ursa/link/1`). The device that has the account shows a
+link code (its endpoint ticket plus a 32-byte one-time secret, as text or a QR code). The new
+device dials it, proves it knows the secret, and sends its X-Wing public key. Both screens show
+the same 6-digit confirmation code (a hash of the secret and the transcript); after the person
+confirms, the account device seals the root key to the new device with X-Wing (post-quantum,
+unlike iroh's TLS) and signs its certificate. Windows to Android and Android to Windows are
+the same protocol.
+
+**The account head.** One small signed record per account, the root of everything:
+`{account id, seq, sealed payload}`. The payload (only the account can open it) lists the
+account's devices, home nodes, friends and the current library index object. Nodes store heads
+with compare-and-set on `seq`, so two devices updating at once cannot lose each other's change:
+the loser re-reads, merges and retries. The library index becomes an object (manifest ids plus
+tombstones) that the head points to.
+
+**Where the head lives.** On every home node of the account *and* on every friend node that
+holds its shards. Any one of them can hand it back.
+
+**Finding it with no node of yours left, iroh's way.** The locator key publishes a pkarr
+record (signed DNS TXT, `SignedPacket`) listing the endpoint ids of the nodes holding the head,
+through iroh's pkarr relay (`dns.iroh.link`, configurable; Buttercup can run its own
+iroh-dns-server) and optionally the Mainline DHT (`iroh-mainline-address-lookup`). Every home
+node republishes it. From a recovery key: derive the locator, resolve, dial any listed node,
+fetch the head, open it.
+
+**The pool.** Friends invite each other at the account level (an invite carries the account id
+and its node tickets). A node owner grants a friend's account a quota; the node then accepts
+that account's shards and head. Nodes account bytes per account and refuse past the quota.
+
+**Erasure coding, now.** Each sealed chunk is Reed-Solomon coded into `n` shards, any `k` of
+which rebuild it (256 KiB column slices, S1), each shard on a different node of the pool (a
+person's nodes count as one failure domain). With five people that is **3-of-5**: survives any
+two nodes gone, 1.67x storage. The manifest records each shard's id and node. Reads use S2's
+pull scheduler across whichever `k` answer first. Chunk packing into stripes comes later; for
+now a small file costs `n` shards.
+
+**Repair.** A device (or an owner's home node) walks the library, finds shards on nodes that are
+gone or answer wrong, rebuilds them from `k` others onto live nodes, and rewrites the
+manifests. A new home node is filled the same way.
+
+**Products in this milestone.** The node (v2 protocol: account auth, grants and quotas,
+shards, heads), the client library shared by the desktop host and a new `ursa` CLI, the Windows
+app's onboarding (create, link, recover; then "add a node you own" is required before the
+library opens if the account has none), device linking, friends and nodes screens. The Android
+app follows in its own project, on the same core.
+
+**The test.** Five people on Buttercup, each with their own identity and node (its own bucket),
+driven by the CLI in an in-cluster Job: onboard all five, befriend, upload, add a second device
+by link, then delete one person's node *and its bucket*, recover that person from the key file
+alone (pkarr lookup), and check every file re-downloads byte-identical; then repair and check
+the pool is back to five shards per chunk.
+
 ### Phase 4: polish
 
 Everything that makes it feel finished: on-device search (dates, places, faces, CLIP-style

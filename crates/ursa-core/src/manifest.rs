@@ -11,11 +11,34 @@ pub const VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkRef {
+    /// The sealed chunk's id (hash of its ciphertext).
     pub id: ObjectId,
     #[serde(with = "hex32")]
     pub key: [u8; 32],
     /// Plaintext length.
     pub len: u64,
+    /// Where the coded shards are. Absent: the sealed chunk is stored whole, under `id`, on the
+    /// home node (version 0.1 libraries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shards: Option<ShardSet>,
+}
+
+/// A sealed chunk erasure-coded across nodes: any `code.k` of the shards rebuild it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShardSet {
+    pub code: crate::coding::Code,
+    /// Length of the sealed chunk (ciphertext) the shards rebuild.
+    pub sealed_len: u64,
+    pub shards: Vec<ShardRef>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShardRef {
+    /// Shard index, 0..n (0..k are data).
+    pub i: u16,
+    pub id: ObjectId,
+    /// The node holding it: endpoint id, hex.
+    pub node: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,7 +99,7 @@ mod tests {
             added_ms: 1_700_000_100_000,
             width: Some(4032),
             height: Some(3024),
-            chunks: vec![ChunkRef { id: c.id, key: c.key, len: c.plain_len }],
+            chunks: vec![ChunkRef { id: c.id, key: c.key, len: c.plain_len, shards: None }],
             thumb: None,
         }
     }

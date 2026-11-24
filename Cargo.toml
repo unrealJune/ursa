@@ -14,6 +14,13 @@ ursa-core = { path = "crates/ursa-core" }
 ursa-proto = { path = "crates/ursa-proto" }
 
 anyhow = "1"
+argon2 = "0.5"
+base64 = "0.22"
+bip39 = "2"
+ed25519-dalek = "3"
+libcrux-kem = "0.0.11"
+libcrux-ml-dsa = "0.0.12"
+reed-solomon-simd = "3"
 blake3 = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
