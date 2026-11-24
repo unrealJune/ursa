@@ -40,7 +40,16 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
     public string DeviceId { get => deviceId; private set => Set(ref deviceId, value); }
     public string AccountId { get => accountId; private set => Set(ref accountId, value); }
     public string AccountName { get => accountName; private set => Set(ref accountName, value); }
-    public string? Error { get => error; set => Set(ref error, value); }
+    public string? Error
+    {
+        get => error;
+        set
+        {
+            // What the error bar shows is what the collector gets.
+            if (value is not null && value != error) Telemetry.Warn($"shown: {value}");
+            Set(ref error, value);
+        }
+    }
     /// <summary>Why opening a stored account failed (its nodes unreachable), if it did.</summary>
     public string? OpenError { get; private set; }
 

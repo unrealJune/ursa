@@ -14,5 +14,8 @@ public static class CrashLog
             File.AppendAllText(PathName, $"{DateTimeOffset.Now:O} unhandled ({where}): {e}\r\n\r\n");
         }
         catch { /* nothing left to report to */ }
+        // The process is about to end: send it now, not with the next batch.
+        Telemetry.Error($"unhandled ({where}): {e?.GetType().Name}: {e?.Message}", e);
+        Telemetry.Flush();
     }
 }

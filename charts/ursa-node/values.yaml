@@ -55,6 +55,11 @@ persistence:
 
 logLevel: info,iroh=warn,noq=warn
 
+# Developer telemetry: the node's logs as OTLP/HTTP to this collector (e.g.
+# https://otlp.example.com). Empty sends nothing.
+otel:
+  endpoint: ""
+
 extraEnv: []
 
 resources:

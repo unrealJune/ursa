@@ -11,6 +11,7 @@ public partial class App : Application
 
     public App()
     {
+        Telemetry.Start();
         InitializeComponent();
         // A crash otherwise leaves only "0xc0000409 in ntdll" in the event log. This records the
         // managed exception behind it; a failure inside WinUI's native code still goes unrecorded.
