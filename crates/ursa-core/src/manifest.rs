@@ -32,6 +32,13 @@ pub struct ShardSet {
     pub shards: Vec<ShardRef>,
 }
 
+/// An object stored coded across nodes: its id (hash of the whole object) and where its shards are.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredRef {
+    pub id: ObjectId,
+    pub shards: ShardSet,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShardRef {
     /// Shard index, 0..n (0..k are data).

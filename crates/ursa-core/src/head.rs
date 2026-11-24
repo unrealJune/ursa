@@ -57,7 +57,7 @@ pub struct AccountState {
     pub friends: Vec<Friend>,
     /// The current library index object, if anything has been stored.
     #[serde(default)]
-    pub index: Option<ObjectId>,
+    pub index: Option<crate::manifest::StoredRef>,
 }
 
 impl AccountState {
@@ -157,6 +157,38 @@ pub struct IndexEntry {
     pub added_ms: i64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deleted: bool,
+    /// Where the manifest's shards are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<crate::manifest::ShardSet>,
+    /// The manifest object, when it is no longer the one the file was added as. The key stays
+    /// the file's id for good; a repair that moves chunks writes a new manifest and points here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<ObjectId>,
+    /// Bumped by every re-placement, so the newest placement wins a merge.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rev: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+impl IndexEntry {
+    pub fn new(added_ms: i64, at: Option<crate::manifest::ShardSet>) -> Self {
+        Self { added_ms, deleted: false, at, manifest: None, rev: 0 }
+    }
+
+    /// The object holding this file's manifest.
+    pub fn manifest_id(&self, file: &ObjectId) -> ObjectId {
+        self.manifest.unwrap_or(*file)
+    }
+
+    /// Records a new placement of the manifest (after a repair).
+    pub fn replace(&mut self, file: &ObjectId, manifest: ObjectId, at: crate::manifest::ShardSet) {
+        self.manifest = (manifest != *file).then_some(manifest);
+        self.at = Some(at);
+        self.rev += 1;
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,18 +201,28 @@ impl LibraryIndex {
         self.entries.iter().filter(|(_, e)| !e.deleted).map(|(id, _)| id)
     }
 
-    pub fn add(&mut self, id: ObjectId, added_ms: i64) {
-        self.entries.entry(id).or_insert(IndexEntry { added_ms, deleted: false });
+    pub fn add(&mut self, id: ObjectId, added_ms: i64, at: Option<crate::manifest::ShardSet>) {
+        let e = self.entries.entry(id).or_insert(IndexEntry::new(added_ms, None));
+        if at.is_some() {
+            e.at = at;
+        }
     }
 
     pub fn delete(&mut self, id: ObjectId) {
-        self.entries.entry(id).or_insert(IndexEntry { added_ms: 0, deleted: false }).deleted = true;
+        self.entries.entry(id).or_insert(IndexEntry::new(0, None)).deleted = true;
     }
 
+    /// Union of both sides; a deletion wins; the newest placement wins, and a known location
+    /// wins over none.
     pub fn merge(&mut self, other: &LibraryIndex) {
         for (id, e) in &other.entries {
             let mine = self.entries.entry(*id).or_insert_with(|| e.clone());
             mine.deleted |= e.deleted;
+            if e.rev > mine.rev || (mine.at.is_none() && e.rev == mine.rev) {
+                mine.at = e.at.clone();
+                mine.manifest = e.manifest;
+                mine.rev = e.rev;
+            }
         }
     }
 
@@ -224,12 +266,12 @@ mod tests {
     fn index_merge_keeps_both_sides_and_deletes_win() {
         let (x, y, z) = (ObjectId::of(b"x"), ObjectId::of(b"y"), ObjectId::of(b"z"));
         let mut a = LibraryIndex::default();
-        a.add(x, 1);
-        a.add(y, 2);
+        a.add(x, 1, None);
+        a.add(y, 2, None);
         let mut b = LibraryIndex::default();
-        b.add(x, 1);
+        b.add(x, 1, None);
         b.delete(y);
-        b.add(z, 3);
+        b.add(z, 3, None);
         a.merge(&b);
         let live: Vec<_> = a.live().copied().collect();
         assert_eq!(live.len(), 2);
@@ -237,10 +279,27 @@ mod tests {
     }
 
     #[test]
+    fn a_repaired_file_keeps_its_id_and_the_newest_placement_wins() {
+        let file = ObjectId::of(b"file");
+        let set = |len| crate::manifest::ShardSet { code: crate::coding::Code::new(1, 3).unwrap(), sealed_len: len, shards: vec![] };
+        let mut stale = LibraryIndex::default();
+        stale.add(file, 1, Some(set(10)));
+        let mut repaired = stale.clone();
+        let moved = ObjectId::of(b"new manifest");
+        repaired.entries.get_mut(&file).unwrap().replace(&file, moved, set(11));
+        // Either order of merging ends on the repaired placement, under the same file id.
+        for (mut a, b) in [(stale.clone(), repaired.clone()), (repaired.clone(), stale.clone())] {
+            a.merge(&b);
+            let e = &a.entries[&file];
+            assert_eq!((e.manifest_id(&file), e.at.as_ref().unwrap().sealed_len, e.rev), (moved, 11, 1));
+        }
+    }
+
+    #[test]
     fn index_seals_for_the_account_only() {
         let a = Account::generate();
         let mut idx = LibraryIndex::default();
-        idx.add(ObjectId::of(b"m"), 5);
+        idx.add(ObjectId::of(b"m"), 5, None);
         let (id, sealed) = idx.seal(&a);
         assert_eq!(LibraryIndex::open(&a, &id, &sealed).unwrap(), idx);
         assert!(LibraryIndex::open(&Account::generate(), &id, &sealed).is_err());
