@@ -108,5 +108,6 @@ Caveats, each with an answer:
   combiner or label means re-deriving keys under a new version, not re-keying from scratch.
 - **libcrux is 0.0.x.** Pin exact versions and upgrade deliberately; the interop tests catch a
   behaviour change.
-- **libcrux does not expose X-Wing public-key-from-seed**; Ursa derives it once at key creation
-  (libcrux `key_gen` with the seed as its randomness, checked against RustCrypto in tests).
+- **An X-Wing key pair comes from its seed with libcrux `key_gen_derand`** (the seed as its
+  randomness); there is no separate public-key-from-seed call. `ursa-core` derives it that way on
+  every open, and the seeds match RustCrypto's in the interop tests.
