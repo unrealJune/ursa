@@ -22,20 +22,16 @@
   <ItemGroup>
     <Content Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
     <!-- The Rust host ships beside the app. CI builds it first; locally, cargo build -p ursa-host. -->
-    <Content Include="$(MSBuildThisFileDirectory)..\..\..\target\release\ursa-host.exe"
-             Condition="Exists('$(MSBuildThisFileDirectory)..\..\..\target\release\ursa-host.exe')"
-             Link="ursa-host.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="$(MSBuildThisFileDirectory)..\..\..\target\release\ursa-host.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\..\..\target\release\ursa-host.exe')" Link="ursa-host.exe" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.5" />
+    <PackageReference Include="QRCoder" Version="1.9.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <PackageReference Include="Velopack" Version="1.2.161" />
   </ItemGroup>
   <!-- Unpackaged WinUI omits the app PRI from publish (WindowsAppSDK#6720). -->
-  <Target Name="PublishUnpackagedProjectPri"
-          BeforeTargets="ComputeResolvedFilesToPublishList"
-          DependsOnTargets="$(GenerateProjectPriFile)"
-          Condition="'$(WindowsPackageType)' == 'None' and '$(UseWinUI)' == 'true'">
+  <Target Name="PublishUnpackagedProjectPri" BeforeTargets="ComputeResolvedFilesToPublishList" DependsOnTargets="$(GenerateProjectPriFile)" Condition="'$(WindowsPackageType)' == 'None' and '$(UseWinUI)' == 'true'">
     <ItemGroup>
       <ResolvedFileToPublish Include="$(ProjectPriFullPath)">
         <RelativePath>$(ProjectPriFileName)</RelativePath>
