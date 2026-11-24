@@ -103,6 +103,18 @@ jobs:
           wait
           df -h /
 
+      # The runner has 16 GB of memory and no swap. With Gradle's 5 GB heap, the Kotlin daemon and
+      # parallel CMake workers, the first full build was killed during R8 ("The runner has
+      # received a shutdown signal"), as Street Cryptid's release builds were before they got swap.
+      - name: Add swap
+        run: |
+          sudo fallocate -l 8G /ursa-build.swap
+          sudo chmod 600 /ursa-build.swap
+          sudo mkswap /ursa-build.swap > /dev/null
+          sudo swapon /ursa-build.swap
+          swapon --show
+          free -h
+
       - name: Rust
         id: rust
         run: |
@@ -115,7 +127,7 @@ jobs:
       # build reads, so a hit skips the Rust build entirely and a miss rebuilds from scratch.
       - name: Restore the built core
         id: core
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             apps/android/modules/ursa-core/android/src/main/jniLibs
@@ -139,6 +151,16 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           # shellcheck disable=SC2086
           bash apps/android/scripts/build-core.sh $ABIS
+      # Saved at once, not at the end of the job: a build that dies later (it has, twice) would
+      # otherwise leave nothing behind, and the next one would build the core again.
+      - name: Save the built core
+        if: steps.core.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            apps/android/modules/ursa-core/android/src/main/jniLibs
+            apps/android/modules/ursa-core/android/src/main/java/uniffi
+          key: ${{ steps.core.outputs.cache-primary-key }}
 
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-java@v4
