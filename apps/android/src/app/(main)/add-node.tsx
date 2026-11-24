@@ -2,13 +2,12 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import { errorText, Ursa } from 'ursa-core';
 
-import { useUrsa } from '@/core/store';
+import { refreshStatus } from '@/core/session';
 import { useTheme } from '@/theme';
 import { CodeField } from '@/ui/code-field';
 import { Button, Field, Notice, Page, Txt } from '@/ui/kit';
 
 export default function AddNode() {
-  const { refreshStatus } = useUrsa();
   const { c } = useTheme();
   const [link, setLink] = useState('');
   const [label, setLabel] = useState('');

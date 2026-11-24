@@ -7,21 +7,28 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { errorText, type LibraryItem } from 'ursa-core';
 
 import { fetchFile, openFile, saveFile, shareFile } from '@/core/files';
-import { useUrsa } from '@/core/store';
+import { remove, useLibrary } from '@/core/library';
 import { useThumb } from '@/core/thumbs';
 import { bytes, dateTime, isMedia } from '@/format';
 import { useTheme } from '@/theme';
 import { Icon, IconButton, Loading, Progress, Txt } from '@/ui/kit';
 
-/** Full-screen photos, swiped through in library order. */
+/**
+ * Full-screen photos, swiped through in library order. The photo on show is tracked by its id,
+ * not its position, so an upload landing at the top of the library (or a delete) while this is
+ * open does not swap the photo under the person's finger.
+ */
 export default function Viewer() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { items, remove } = useUrsa();
+  const items = useLibrary((s) => s.items);
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const media = useMemo(() => items.filter((i) => isMedia(i.mime)), [items]);
-  const start = Math.max(0, media.findIndex((i) => i.fileId === id));
-  const [index, setIndex] = useState(start);
+  const [currentId, setCurrentId] = useState(id);
+  const found = media.findIndex((i) => i.fileId === currentId);
+  const [start] = useState(() => Math.max(0, found));
+  // Gone (another device deleted it): stay near where it was.
+  const index = found >= 0 ? found : Math.min(start, media.length - 1);
   const [chrome, setChrome] = useState(true);
   const [info, setInfo] = useState(false);
   const [busy, setBusy] = useState<number | null>(null);
@@ -52,7 +59,11 @@ export default function Viewer() {
         keyExtractor={(i) => i.fileId}
         showsHorizontalScrollIndicator={false}
         windowSize={3}
-        onMomentumScrollEnd={(e) => setIndex(Math.round(e.nativeEvent.contentOffset.x / width))}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+        onMomentumScrollEnd={(e) => {
+          const at = media[Math.round(e.nativeEvent.contentOffset.x / width)];
+          if (at) setCurrentId(at.fileId);
+        }}
         renderItem={({ item, index: i }) => <Slide item={item} width={width} active={Math.abs(i - index) <= 1} onTap={() => setChrome((v) => !v)} />}
       />
 
@@ -88,9 +99,9 @@ export default function Viewer() {
                         style: 'destructive',
                         onPress: async () => {
                           try {
-                            await remove(current.fileId);
+                            await remove(current);
                             if (media.length <= 1) router.back();
-                            else setIndex((i) => Math.min(i, media.length - 2));
+                            else setCurrentId(media[index + 1]?.fileId ?? media[index - 1]?.fileId);
                           } catch (e) {
                             Alert.alert('Could not delete', errorText(e));
                           }

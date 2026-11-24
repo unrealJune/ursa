@@ -4,7 +4,7 @@ import { Share, View } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 import { errorText, Ursa } from 'ursa-core';
 
-import { useUrsa } from '@/core/store';
+import { refreshStatus, useSession } from '@/core/session';
 import { shortId } from '@/format';
 import { useTheme } from '@/theme';
 import { CodeField } from '@/ui/code-field';
@@ -15,7 +15,7 @@ import { Button, Divider, Field, Group, ListRow, Notice, Page, SectionHeader, Tx
  * puts their nodes in your pool (they add yours to theirs the same way).
  */
 export default function Friends() {
-  const { status, refreshStatus } = useUrsa();
+  const status = useSession((s) => s.status);
   const { c } = useTheme();
   const [invite, setInvite] = useState<string | null>(null);
   const [theirs, setTheirs] = useState('');

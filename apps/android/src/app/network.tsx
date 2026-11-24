@@ -1,15 +1,14 @@
-import { router } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { errorText } from 'ursa-core';
 
 import { DEFAULT_RELAYS, relayToken } from '@/core/settings';
-import { useUrsa } from '@/core/store';
+import { setNetwork, useSession } from '@/core/session';
 import { useTheme } from '@/theme';
 import { Button, Field, IconButton, Notice, Page, Txt } from '@/ui/kit';
 
 /** The iroh relays this phone uses, and the token they ask for. */
 export default function Network() {
-  const { prefs, setNetwork } = useUrsa();
+  const prefs = useSession((s) => s.prefs);
   const { c } = useTheme();
   const [relays, setRelays] = useState(prefs.relays.join('\n'));
   const [token, setToken] = useState('');
@@ -64,8 +63,8 @@ export default function Network() {
               .split(/\s+/)
               .map((r) => r.trim())
               .filter(Boolean);
+            // Restarting the core leaves this screen: the app goes where the new start lands.
             await setNetwork(list, token.trim() || null);
-            if (router.canGoBack()) router.back();
           } catch (e) {
             setError(errorText(e));
           } finally {

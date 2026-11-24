@@ -13,9 +13,11 @@ export type Prefs = {
   backup: boolean;
   /** Back up videos too. */
   backupVideos: boolean;
+  /** How far the photo grid is zoomed: an index into the grid's zoom levels. */
+  gridZoom: number;
 };
 
-const DEFAULT_PREFS: Prefs = { relays: DEFAULT_RELAYS, backup: false, backupVideos: true };
+export const DEFAULT_PREFS: Prefs = { relays: DEFAULT_RELAYS, backup: false, backupVideos: true, gridZoom: 2 };
 
 /** The account root (hex), kept by the Android Keystore through expo-secure-store. */
 export const accountKey = {

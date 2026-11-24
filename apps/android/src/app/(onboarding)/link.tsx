@@ -2,14 +2,13 @@ import { useEffect, useState } from 'react';
 import { View } from 'react-native';
 import { errorText, Ursa } from 'ursa-core';
 
-import { useUrsa } from '@/core/store';
+import { adopt } from '@/core/session';
 import { useTheme } from '@/theme';
 import { CodeField } from '@/ui/code-field';
 import { Button, Loading, Notice, Page, Txt } from '@/ui/kit';
 
 /** Joins an account another device offers: scan or paste its link code, then match the confirmation code. */
 export default function Link() {
-  const { adopt } = useUrsa();
   const { c } = useTheme();
   const [code, setCode] = useState('');
   const [confirm, setConfirm] = useState<string | null>(null);

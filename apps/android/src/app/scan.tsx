@@ -1,10 +1,10 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { Linking, StyleSheet, View } from 'react-native';
 
-import { deliverScan } from '@/core/handoff';
+import { cancelScan, deliverScan } from '@/core/handoff';
 import { useTheme } from '@/theme';
 import { Button, Centered, Icon, Txt, withAlpha } from '@/ui/kit';
 
@@ -13,6 +13,7 @@ export default function Scan() {
   const { c } = useTheme();
   const [permission, request] = useCameraPermissions();
   const done = useRef(false);
+  useEffect(() => () => void (done.current || cancelScan()), []);
 
   if (!permission) return <Centered>{null}</Centered>;
   if (!permission.granted) {
