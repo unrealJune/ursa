@@ -2,6 +2,7 @@ import { type AccountKeys, errorText, type Status, Ursa } from 'ursa-core';
 
 import { accountKey, DEFAULT_PREFS, loadPrefs, type Prefs, relayToken, savePrefs } from './settings';
 import { createStore, singleFlight, sleep } from './state';
+import { log, startTelemetry } from './telemetry';
 
 /**
  * Where the app is:
@@ -46,6 +47,7 @@ function phaseOf(st: Status): Phase {
 
 function apply(st: Status) {
   const phase = phaseOf(st);
+  if (phase !== session.get().phase) log('INFO', `phase: ${phase}`, { phase });
   session.set({ status: st, phase, problem: phase === 'offline' ? (st.openError ?? 'None of your nodes answered.') : null });
   clearRetry();
   if (phase === 'offline') {
@@ -75,6 +77,7 @@ export const start = singleFlight(async () => {
   // A retry from the offline screen keeps that screen up instead of flashing "Connecting".
   if (session.get().phase !== 'offline') session.set({ phase: 'starting', problem: null });
   try {
+    await startTelemetry();
     const [prefs, key, token] = await Promise.all([loadPrefs(), accountKey.get(), relayToken.get()]);
     hasKey = !!key;
     session.set({ prefs });
@@ -83,9 +86,11 @@ export const start = singleFlight(async () => {
       await sleep(1500 * i);
       st = await Ursa.init(key, prefs.relays, token);
     }
+    if (st.openError) log('WARN', `start: the account did not open: ${st.openError}`);
     apply(st);
   } catch (e) {
     session.set({ phase: 'failed', status: null, problem: errorText(e) });
+    log('ERROR', `start failed: ${errorText(e)}`);
   }
 });
 

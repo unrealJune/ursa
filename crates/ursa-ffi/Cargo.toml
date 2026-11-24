@@ -30,4 +30,5 @@ uniffi = "0.31"
 ursa-client = { path = "../ursa-client" }
 ursa-core.workspace = true
 ursa-proto.workspace = true
+ursa-telemetry = { path = "../ursa-telemetry" }
 

@@ -67,6 +67,10 @@ type Events = {
 
 declare class UrsaCoreModule extends NativeModule<Events> {
   init(accountKey: string | null, relays: string[], relayToken: string | null): Promise<Status>;
+  /** Starts exporting the core's logs to an OTLP collector (once per process). */
+  configureTelemetry(endpoint: string, instanceId: string, version: string): boolean;
+  /** Sends the core's buffered logs now. */
+  flushTelemetry(): void;
   /** Stops the endpoint, to `init` again with other relays. */
   shutdown(): Promise<void>;
   status(): Promise<Status>;
