@@ -114,15 +114,37 @@ async function batch(label: string, items: LibraryItem[], parallel: number, run:
   return done;
 }
 
-/** Deletes files from every device and node. Resolves with the ids that were deleted. */
-export async function removeMany(items: LibraryItem[]): Promise<string[]> {
-  const gone = new Set<string>();
-  await batch(items.length === 1 ? 'Deleting' : `Deleting ${items.length} items`, items, 3, async (item) => {
-    await Ursa.delete(item.fileId);
-    gone.add(item.fileId);
-    library.set((s) => ({ items: s.items.filter((i) => i.fileId !== item.fileId) }));
-  });
-  return [...gone];
+/** How many files one library change deletes. Each change uploads the whole index once. */
+const DELETE_CHUNK = 250;
+
+/**
+ * Deletes files from every device and node, in as few library changes as it can: each change
+ * rewrites the whole index and the account head, so one per file was slow, and running a few at
+ * once made them overwrite each other until the core gave up ("the account head kept changing").
+ */
+export async function removeMany(items: LibraryItem[]) {
+  if (library.get().bulk) throw new Error('Another batch is still running.');
+  const total = items.length;
+  library.set({ bulk: { label: total === 1 ? 'Deleting' : `Deleting ${total} items`, done: 0, failed: 0, total }, bulkError: null });
+  let failed = 0;
+  let error: string | null = null;
+  try {
+    for (let i = 0; i < total; i += DELETE_CHUNK) {
+      const chunk = items.slice(i, i + DELETE_CHUNK);
+      const ids = new Set(chunk.map((c) => c.fileId));
+      try {
+        await Ursa.deleteMany([...ids]);
+        library.set((s) => ({ items: s.items.filter((it) => !ids.has(it.fileId)), bulk: s.bulk && { ...s.bulk, done: s.bulk.done + chunk.length } }));
+      } catch (e) {
+        failed += chunk.length;
+        error = errorText(e);
+        log('WARN', `bulk delete failed: ${error}`, { count: chunk.length });
+        library.set((s) => ({ bulk: s.bulk && { ...s.bulk, failed: s.bulk.failed + chunk.length } }));
+      }
+    }
+  } finally {
+    library.set({ bulk: null, bulkError: failed ? `${failed} of ${total} could not be deleted. ${error}` : null });
+  }
 }
 
 export async function remove(item: LibraryItem) {
