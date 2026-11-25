@@ -5,6 +5,8 @@ use anyhow::{Result, anyhow, bail};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tracing::warn;
+
+use crate::stats::{Stage, Stats};
 use ursa_core::ObjectId;
 use ursa_core::coding::{self, Code};
 use ursa_core::head::NodeRef;
@@ -35,7 +37,10 @@ impl Session {
     /// Codes `bytes` and puts shard `i` on `nodes[(rotate + i) % len]`, all in parallel. A node
     /// that refuses is replaced by the next unused one, if any.
     pub(crate) async fn store_object(&self, bytes: &[u8], code: Code, nodes: &[NodeRef], rotate: usize) -> Result<ShardSet> {
-        let shards = coding::encode(code, bytes);
+        let shards = {
+            let _t = Stage::start("code");
+            coding::encode(code, bytes)
+        };
         let n = code.n as usize;
         if nodes.len() < n {
             bail!("{} shards need {} nodes; {} are writable", n, n, nodes.len());
@@ -48,7 +53,9 @@ impl Session {
             let shard = &shards[i];
             async move {
                 let id = ObjectId::of(shard);
+                let started = std::time::Instant::now();
                 let r = async { self.node(node).await?.put(id, shard).await }.await;
+                Stats::shard(&node.id, shard.len(), started.elapsed(), r.is_ok());
                 (i, id, node, r)
             }
         }))
@@ -66,7 +73,10 @@ impl Session {
                     self.drop_conn(&node.id).await;
                     let mut ok = false;
                     while let Some(alt) = spare.pop() {
-                        if async { self.node(alt).await?.put(id, &shards[i]).await }.await.is_ok() {
+                        let started = std::time::Instant::now();
+                        let r = async { self.node(alt).await?.put(id, &shards[i]).await }.await;
+                        Stats::shard(&alt.id, shards[i].len(), started.elapsed(), r.is_ok());
+                        if r.is_ok() {
                             placed.push(ShardRef { i: i as u16, id, node: alt.id.clone() });
                             ok = true;
                             break;
@@ -101,7 +111,12 @@ impl Session {
         let start = |s: &ShardRef| {
             let node = self.node_ref(&s.node, &state);
             let (i, sid) = (s.i as usize, s.id);
-            async move { (i, node.id.clone(), async { self.node(&node).await?.get(sid).await }.await) }
+            async move {
+                let started = std::time::Instant::now();
+                let r = async { self.node(&node).await?.get(sid).await }.await;
+                Stats::shard(&node.id, r.as_ref().map_or(0, |b| b.len()), started.elapsed(), r.is_ok());
+                (i, node.id.clone(), r)
+            }
         };
         while inflight.len() < k {
             match queue.pop() {
@@ -118,6 +133,7 @@ impl Session {
                 Ok(None) => break,
                 Err(_) => {
                     if let Some(s) = queue.pop() {
+                        Stats::hedge();
                         inflight.push(start(s));
                     }
                     continue;
@@ -142,6 +158,9 @@ impl Session {
         }
         if got.len() < k {
             bail!("only {} of the {} shards needed answered ({})", got.len(), k, errors.join("; "));
+        }
+        if got.iter().any(|(i, _)| *i >= k) {
+            Stats::decoded();
         }
         let avail: Vec<(usize, &[u8])> = got.iter().map(|(i, b)| (*i, b.as_slice())).collect();
         let bytes = coding::decode(set.code, set.sealed_len as usize, &avail).map_err(|e| anyhow!("{e}"))?;
