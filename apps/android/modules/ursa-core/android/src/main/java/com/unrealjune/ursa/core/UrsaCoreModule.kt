@@ -49,6 +49,28 @@ class UrsaCoreModule : Module() {
       throw UrsaCoreException(e.message ?: "Ursa failed")
     }
 
+  private suspend fun upload(uri: String, meta: Map<String, Any?>, task: String, staged: Boolean): Map<String, Any?> {
+    val prepared = withContext(Dispatchers.IO) { Media.prepare(context, Uri.parse(uri), meta) }
+    try {
+      val request =
+        UploadRequest(
+          path = prepared.path,
+          name = prepared.name,
+          mime = prepared.mime,
+          createdMs = prepared.createdMs,
+          modifiedMs = prepared.modifiedMs,
+          width = prepared.width?.toUInt(),
+          height = prepared.height?.toUInt(),
+          thumbPath = prepared.thumbPath,
+        )
+      return call {
+        if (staged) core.uploadStaged(request, progress(task)).toMap() else core.upload(request, progress(task)).toMap()
+      }
+    } finally {
+      withContext(Dispatchers.IO) { prepared.cleanup() }
+    }
+  }
+
   private fun progress(task: String) =
     object : ProgressListener {
       override fun onProgress(done: ULong, total: ULong) {
@@ -152,27 +174,16 @@ class UrsaCoreModule : Module() {
      * the core reads paths. `meta` may carry name, mime, createdMs, width and height.
      */
     AsyncFunction("upload") Coroutine { uri: String, meta: Map<String, Any?>, task: String ->
-      val prepared = withContext(Dispatchers.IO) { Media.prepare(context, Uri.parse(uri), meta) }
-      try {
-        call {
-          core.upload(
-            UploadRequest(
-              path = prepared.path,
-              name = prepared.name,
-              mime = prepared.mime,
-              createdMs = prepared.createdMs,
-              modifiedMs = prepared.modifiedMs,
-              width = prepared.width?.toUInt(),
-              height = prepared.height?.toUInt(),
-              thumbPath = prepared.thumbPath,
-            ),
-            progress(task),
-          ).toMap()
-        }
-      } finally {
-        withContext(Dispatchers.IO) { prepared.cleanup() }
-      }
+      upload(uri, meta, task, staged = false)
     }
+
+    /** Uploads without writing the library entry; `commitUploads` writes a batch of them at once. */
+    AsyncFunction("uploadStaged") Coroutine { uri: String, meta: Map<String, Any?>, task: String ->
+      upload(uri, meta, task, staged = true)
+    }
+
+    /** Writes every staged upload into the library in one change; resolves with how many. */
+    AsyncFunction("commitUploads") Coroutine { -> call { core.commitUploads().toInt() } }
 
     /** Downloads into the cache (once) and returns the file's URI, for viewing or sharing. */
     AsyncFunction("download") Coroutine { fileId: String, name: String, task: String ->

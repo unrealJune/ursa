@@ -133,6 +133,21 @@ pub struct UploadRequest {
     pub thumb_path: Option<String>,
 }
 
+impl From<UploadRequest> for UploadMeta {
+    fn from(r: UploadRequest) -> Self {
+        UploadMeta {
+            path: r.path.into(),
+            name: r.name,
+            mime: r.mime,
+            created_ms: r.created_ms,
+            modified_ms: r.modified_ms,
+            width: r.width,
+            height: r.height,
+            thumb_path: r.thumb_path.map(Into::into),
+        }
+    }
+}
+
 #[derive(uniffi::Record)]
 pub struct PoolNode {
     pub id: String,
@@ -705,6 +720,7 @@ impl UrsaCore {
         .await
     }
 
+    /// Uploads a file and writes it into the library at once.
     pub async fn upload(
         &self,
         request: UploadRequest,
@@ -712,24 +728,40 @@ impl UrsaCore {
     ) -> Res<LibraryItem> {
         let inner = self.inner.clone();
         on_rt(async move {
-            let meta = UploadMeta {
-                path: request.path.into(),
-                name: request.name,
-                mime: request.mime,
-                created_ms: request.created_ms,
-                modified_ms: request.modified_ms,
-                width: request.width,
-                height: request.height,
-                thumb_path: request.thumb_path.map(Into::into),
-            };
             Ok(inner
                 .session()
                 .await?
-                .upload(meta, throttled(listener))
+                .upload(request.into(), throttled(listener))
                 .await?
                 .into())
         })
         .await
+    }
+
+    /// Uploads a file and leaves its library entry for `commit_uploads`, which writes any number
+    /// in one index change. The file lists like any other meanwhile; it is only kept for good
+    /// once a commit after it succeeds (a process that ends first loses it from the library).
+    pub async fn upload_staged(
+        &self,
+        request: UploadRequest,
+        listener: Arc<dyn ProgressListener>,
+    ) -> Res<LibraryItem> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            Ok(inner
+                .session()
+                .await?
+                .upload_staged(request.into(), throttled(listener))
+                .await?
+                .into())
+        })
+        .await
+    }
+
+    /// Writes every staged upload into the library in one change. Returns how many it wrote.
+    pub async fn commit_uploads(&self) -> Res<u32> {
+        let inner = self.inner.clone();
+        on_rt(async move { Ok(inner.session().await?.commit_uploads().await? as u32) }).await
     }
 
     /// The decrypted thumbnail's path, cached on this device.

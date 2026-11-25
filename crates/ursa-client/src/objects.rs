@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow, bail};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use tracing::debug;
+use tracing::warn;
 use ursa_core::ObjectId;
 use ursa_core::coding::{self, Code};
 use ursa_core::head::NodeRef;
@@ -57,7 +57,12 @@ impl Session {
             match r {
                 Ok(()) => placed.push(ShardRef { i: i as u16, id, node: node.id.clone() }),
                 Err(e) => {
-                    debug!(node = %short(&node.id), "shard put failed, trying a spare: {e:#}");
+                    // Which path the shard was going down, before the connection is dropped.
+                    let paths = match self.conns.lock().await.get(&node.id) {
+                        Some(c) => Self::paths_of(c),
+                        None => "no connection".into(),
+                    };
+                    warn!(node = %short(&node.id), paths = %paths, "shard put failed, trying a spare: {e:#}");
                     self.drop_conn(&node.id).await;
                     let mut ok = false;
                     while let Some(alt) = spare.pop() {

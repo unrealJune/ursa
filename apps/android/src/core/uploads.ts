@@ -54,6 +54,48 @@ let draining = false;
 /** Bumped when the account goes away, so an upload already running does not record itself. */
 let generation = 0;
 
+/**
+ * Uploads are staged: the core stores each file but writes the library index once per batch,
+ * since writing it per file re-uploaded the whole index for every photo of a backup. A staged
+ * file shows in the library at once, but is only kept for good when its batch is committed, so
+ * a camera-roll photo counts as backed up only then; one the app dies before committing is
+ * found again by the next backup and uploaded again.
+ */
+const BATCH_FILES = 25;
+const BATCH_MS = 15_000;
+/** Staged since the last commit, with the camera-roll asset each came from. */
+let uncommitted: { assetId?: string; fileId: string }[] = [];
+let commitTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Writes the staged uploads into the library, and records what is now backed up. */
+export const commitUploads = singleFlight(async () => {
+  if (commitTimer) clearTimeout(commitTimer);
+  commitTimer = null;
+  if (uncommitted.length === 0) return;
+  const gen = generation;
+  const batch = uncommitted;
+  try {
+    // 0 when another library change (a delete) already wrote them: they are committed either way.
+    await Ursa.commitUploads();
+    if (gen !== generation) return;
+    uncommitted = uncommitted.filter((u) => !batch.includes(u));
+    const map = await backedUp.load();
+    for (const u of batch) if (u.assetId) map[u.assetId] = u.fileId;
+    backedUp.save();
+  } catch (e) {
+    if (gen !== generation) return;
+    uploads.set({ lastError: `Saving the library: ${errorText(e)}` });
+    log('WARN', `upload commit failed: ${errorText(e)}`, { files: batch.length });
+    // Kept for the next try: the next upload, the queue emptying, or the app leaving the screen.
+  }
+});
+
+function staged(assetId: string | undefined, fileId: string) {
+  uncommitted.push({ assetId, fileId });
+  if (uncommitted.length >= BATCH_FILES) commitUploads();
+  else if (!commitTimer) commitTimer = setTimeout(() => commitUploads(), BATCH_MS);
+}
+
 async function drain() {
   if (draining) return;
   draining = true;
@@ -64,15 +106,12 @@ async function drain() {
       uploads.set({ current: { name, done: 0, total: 1 } });
       try {
         const item = await withProgress(
-          (task) => Ursa.upload(job.uri, job.meta, task),
+          (task) => Ursa.uploadStaged(job.uri, job.meta, task),
           (done, total) => gen === generation && uploads.set({ current: { name, done, total } }),
         );
         if (gen !== generation) break;
         upsert(item);
-        if (job.assetId) {
-          (await backedUp.load())[job.assetId] = item.fileId;
-          backedUp.save();
-        }
+        staged(job.assetId, item.fileId);
         uploads.set((u) => ({ done: u.done + 1 }));
       } catch (e) {
         if (gen !== generation) break;
@@ -82,7 +121,11 @@ async function drain() {
     }
   } finally {
     draining = false;
-    if (gen === generation) uploads.set({ current: null });
+    if (gen === generation) {
+      uploads.set({ current: null });
+      // The queue is empty: write what is staged now rather than when the timer fires.
+      await commitUploads();
+    }
     // Files queued under a new account while the old account's last upload was finishing.
     else if (queue.length) drain();
   }
@@ -146,6 +189,9 @@ export const backupNow = singleFlight(async () => {
 export function resetUploads() {
   generation += 1;
   queue = [];
+  uncommitted = [];
+  if (commitTimer) clearTimeout(commitTimer);
+  commitTimer = null;
   backedUp.map = {};
   backedUp.save();
   uploads.set(IDLE);

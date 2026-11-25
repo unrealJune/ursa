@@ -17,7 +17,7 @@ const NONE: Selection = new Set();
 
 export default function Photos() {
   const items = useLibrary((s) => s.items);
-  const loading = useLibrary((s) => s.loading);
+  const pulling = useLibrary((s) => s.pulling);
   const loaded = useLibrary((s) => s.loaded);
   const error = useLibrary((s) => s.error);
   const busy = useLibrary((s) => s.bulk !== null);
@@ -51,7 +51,7 @@ export default function Photos() {
     }, [selecting]),
   );
 
-  const refresh = () => loadLibrary({ fromNodes: true });
+  const refresh = () => loadLibrary({ fromNodes: true, reason: 'pull' });
 
   const save = async () => {
     const list = chosen();
@@ -132,7 +132,7 @@ export default function Photos() {
         selected={selected}
         onSelect={setPicked}
         onOpen={(item) => router.push({ pathname: '/viewer', params: { id: item.fileId } })}
-        refreshing={loading && loaded}
+        refreshing={pulling}
         onRefresh={refresh}
         empty={
           !loaded ? null : (
