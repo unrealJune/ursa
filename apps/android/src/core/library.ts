@@ -2,7 +2,7 @@ import { errorText, type LibraryItem, Ursa } from 'ursa-core';
 
 import { saveFile } from './files';
 import { syncAccount } from './session';
-import { createStore, singleFlight, useStore } from './state';
+import { createStore, useStore } from './state';
 import { log } from './telemetry';
 
 /** A batch the person started on several files at once (delete, save). */
@@ -14,6 +14,8 @@ type LibraryState = {
   /** The list has been read at least once since the account opened. */
   loaded: boolean;
   loading: boolean;
+  /** A read the person asked for (pull to refresh) is running: the only one that shows a spinner. */
+  pulling: boolean;
   /** The last sync with the nodes failed; the list is what this phone already knew. */
   error: string | null;
   bulk: Bulk | null;
@@ -21,7 +23,7 @@ type LibraryState = {
   bulkError: string | null;
 };
 
-const EMPTY: LibraryState = { items: [], loaded: false, loading: false, error: null, bulk: null, bulkError: null };
+const EMPTY: LibraryState = { items: [], loaded: false, loading: false, pulling: false, error: null, bulk: null, bulkError: null };
 
 export const library = createStore<LibraryState>(EMPTY);
 
@@ -37,8 +39,38 @@ let lastSync = 0;
  * Reads the library. With `fromNodes` it first re-reads the account from its nodes (what other
  * devices changed); when they do not answer, the list is still what this phone knows, with a
  * notice, and the app stays where it is.
+ *
+ * One read runs at a time, but a sync asked for while a plain read runs is not lost: it runs
+ * right after. Before, a pull-to-refresh that landed during a plain read joined it and never
+ * asked the nodes, so another device's changes stayed out until the app was restarted.
  */
-export const loadLibrary = singleFlight(async ({ fromNodes }: { fromNodes: boolean }) => {
+export function loadLibrary({ fromNodes, reason }: { fromNodes: boolean; reason?: 'pull' | 'timer' | 'resume' }): Promise<void> {
+  if (fromNodes) syncWanted = true;
+  if (reason === 'pull') {
+    log('INFO', 'library: pull to refresh');
+    library.set({ pulling: true });
+  }
+  if (!reading) {
+    reading = (async () => {
+      try {
+        do {
+          const sync = syncWanted;
+          syncWanted = false;
+          await readOnce(sync);
+        } while (syncWanted);
+      } finally {
+        reading = null;
+        library.set({ pulling: false });
+      }
+    })();
+  }
+  return reading;
+}
+
+let reading: Promise<void> | null = null;
+let syncWanted = false;
+
+async function readOnce(fromNodes: boolean) {
   library.set({ loading: true });
   let error: string | null = null;
   if (fromNodes) {
@@ -60,7 +92,7 @@ export const loadLibrary = singleFlight(async ({ fromNodes }: { fromNodes: boole
   } finally {
     library.set({ loading: false });
   }
-});
+}
 
 /** Syncs with the nodes when the last sync is older than `maxAgeMs`. */
 export function syncIfStale(maxAgeMs: number) {

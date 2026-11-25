@@ -15,9 +15,10 @@ type Sort = 'added' | 'name' | 'size';
 
 export default function Files() {
   const items = useLibrary((s) => s.items);
-  const libLoading = useLibrary((s) => s.loading);
+  const libLoading = useLibrary((s) => s.loading && !s.loaded);
+  const pulling = useLibrary((s) => s.pulling);
   const libError = useLibrary((s) => s.error);
-  const refresh = () => loadLibrary({ fromNodes: true });
+  const refresh = () => loadLibrary({ fromNodes: true, reason: 'pull' });
   const { c } = useTheme();
   const [all, setAll] = useState(false);
   const [sort, setSort] = useState<Sort>('added');
@@ -62,7 +63,7 @@ export default function Files() {
       <FlashList
         data={files}
         keyExtractor={(i) => i.fileId}
-        refreshControl={<RefreshControl refreshing={libLoading} onRefresh={refresh} colors={[c.primary]} progressBackgroundColor={c.surfaceContainerHigh} />}
+        refreshControl={<RefreshControl refreshing={pulling} onRefresh={refresh} colors={[c.primary]} progressBackgroundColor={c.surfaceContainerHigh} />}
         contentContainerStyle={{ paddingBottom: 96 }}
         renderItem={({ item }) => (
           <FileRow

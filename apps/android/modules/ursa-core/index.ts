@@ -96,6 +96,10 @@ declare class UrsaCoreModule extends NativeModule<Events> {
   list(): Promise<LibraryItem[]>;
   thumb(fileId: string): Promise<string>;
   upload(uri: string, meta: UploadMeta, task: string): Promise<LibraryItem>;
+  /** Uploads without writing the library entry yet; `commitUploads` writes a batch at once. */
+  uploadStaged(uri: string, meta: UploadMeta, task: string): Promise<LibraryItem>;
+  /** Writes every staged upload into the library in one change. Resolves with how many. */
+  commitUploads(): Promise<number>;
   download(fileId: string, name: string, task: string): Promise<string>;
   saveToDevice(fileUri: string, name: string, mime: string): Promise<string>;
   /** Opens a downloaded file in the app that handles its type. */

@@ -81,23 +81,77 @@ pub struct RepairReport {
     pub unrecoverable: Vec<String>,
 }
 
+/// An uploaded file whose index entry is waiting for the next index change.
+#[derive(Clone, Debug)]
+pub(crate) struct Staged {
+    id: ObjectId,
+    added_ms: i64,
+    at: ShardSet,
+}
+
+impl Staged {
+    fn apply(&self, idx: &mut LibraryIndex) {
+        idx.add(self.id, self.added_ms, Some(self.at.clone()));
+    }
+}
+
 impl Session {
     // -----------------------------------------------------------------------------------------
     // The index
 
-    pub(crate) async fn index(&self) -> Result<LibraryIndex> {
+    /// The index as stored, without the uploads still waiting to be written.
+    async fn stored_index(&self) -> Result<LibraryIndex> {
         let Some(r) = self.state().await.index else { return Ok(LibraryIndex::default()) };
         let sealed = self.cached_or_fetch(&r.id, &r.shards).await?;
         LibraryIndex::open(&self.account, &r.id, &sealed).map_err(|e| anyhow!("library index: {e}"))
     }
 
+    /// The index as this device sees it: the stored one plus the uploads not written yet, so a
+    /// staged file lists, shows its thumbnail and downloads like any other.
+    pub(crate) async fn index(&self) -> Result<LibraryIndex> {
+        let mut idx = self.stored_index().await?;
+        for s in self.pending_uploads() {
+            s.apply(&mut idx);
+        }
+        Ok(idx)
+    }
+
+    fn pending_uploads(&self) -> Vec<Staged> {
+        self.pending.lock().expect("pending uploads").clone()
+    }
+
+    /// How many uploads are stored but not yet in the index.
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().expect("pending uploads").len()
+    }
+
+    /// Writes every staged upload into the index in one change. Returns how many it wrote.
+    pub async fn commit_uploads(&self) -> Result<usize> {
+        let n = self.pending_count();
+        if n == 0 {
+            return Ok(0);
+        }
+        // change_index writes everything pending along with its own change, here none.
+        self.change_index(|_| {}).await?;
+        info!(files = n, "uploads committed");
+        Ok(n)
+    }
+
     /// Applies `change` to the index and saves it, merging with concurrent changes: if the head
     /// moved under us, the change is re-applied to the newer index.
+    ///
+    /// Every staged upload is written with it: a change is one index upload and one head save
+    /// whatever it carries, so this is where uploads are batched.
     async fn change_index(&self, change: impl Fn(&mut LibraryIndex)) -> Result<()> {
         let _queued = self.index_lock.lock().await;
+        // Staged from here on are left for the next change; these are written by this one.
+        let staged = self.pending_uploads();
         for _ in 0..5 {
             let before = self.state().await.index.as_ref().map(|r| r.id);
-            let mut idx = self.index().await?;
+            let mut idx = self.stored_index().await?;
+            for s in &staged {
+                s.apply(&mut idx);
+            }
             change(&mut idx);
             let (id, sealed) = idx.seal(&self.account);
             let writable = self.writable().await;
@@ -113,6 +167,10 @@ impl Session {
                 })
                 .await?;
             if state.index.as_ref().map(|r| r.id) == Some(id) {
+                if !staged.is_empty() {
+                    let written: std::collections::HashSet<ObjectId> = staged.iter().map(|s| s.id).collect();
+                    self.pending.lock().expect("pending uploads").retain(|s| !written.contains(&s.id));
+                }
                 return Ok(());
             }
         }
@@ -169,7 +227,20 @@ impl Session {
         Ok(items)
     }
 
+    /// Uploads a file and writes it into the library index.
     pub async fn upload(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
+        let item = self.upload_staged(meta, progress).await?;
+        self.commit_uploads().await?;
+        Ok(item)
+    }
+
+    /// Uploads a file (its chunks, thumbnail and manifest) and stages its index entry instead
+    /// of writing it: `commit_uploads` writes every staged entry in one index change. Writing the
+    /// index once per file re-uploaded the whole index per photo during a backup, which grows with
+    /// the library and left every replaced copy on the nodes. A staged file is lost from the
+    /// library (its objects orphaned) if the process ends before a commit, so the caller only
+    /// counts a file as kept once a commit after it has succeeded.
+    pub async fn upload_staged(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
         let writable = self.writable().await;
         let big = code_for(writable.len(), true)?;
         let small = code_for(writable.len(), false)?;
@@ -245,8 +316,7 @@ impl Session {
         };
         let (id, sealed) = manifest::seal(self.account.root(), &m);
         let at = self.store_object(&sealed, small, &writable, rotate).await?;
-        let added = m.added_ms;
-        self.change_index(move |idx| idx.add(id, added, Some(at.clone()))).await?;
+        self.pending.lock().expect("pending uploads").push(Staged { id, added_ms: m.added_ms, at });
         progress(total, total);
         Ok(Item::of(&id, &m))
     }
