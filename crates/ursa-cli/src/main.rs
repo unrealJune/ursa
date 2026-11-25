@@ -142,8 +142,25 @@ fn load_root(profile: &Path) -> Result<AccountKey> {
     root_from_phrase(&phrase).map_err(|e| anyhow!("{e}"))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Stack for the CLI's threads. Debug builds keep deep futures on the stack, and Windows gives a
+/// process's main thread 1 MB: a claim overflowed it.
+const STACK: usize = 16 << 20;
+
+fn main() -> Result<()> {
+    std::thread::Builder::new()
+        .stack_size(STACK)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(STACK)
+                .enable_all()
+                .build()?
+                .block_on(async_main())
+        })?
+        .join()
+        .map_err(|_| anyhow!("the CLI panicked"))?
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
