@@ -76,7 +76,10 @@
                         <Button x:Name="CancelLinkButton" Content="Stop" Click="OnCancelLink" Visibility="Collapsed" />
                     </StackPanel>
                     <StackPanel x:Name="LinkPanel" Spacing="8" Visibility="Collapsed">
-                        <TextBlock Text="On the new device, choose “I already use Ursa” › “Link with another device”, and paste:" TextWrapping="Wrap" />
+                        <TextBlock Text="On the new device, choose “I already use Ursa” › “Link with another device”, and scan this code or paste the text below it:" TextWrapping="Wrap" />
+                        <Border Background="White" CornerRadius="8" Padding="0" HorizontalAlignment="Left">
+                            <Image x:Name="LinkQr" Width="260" Height="260" AutomationProperties.Name="Link code as a QR code" />
+                        </Border>
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -186,7 +189,10 @@
                             </DataTemplate>
                         </ItemsRepeater.ItemTemplate>
                     </ItemsRepeater>
-                    <Button Content="Copy my invite" Click="OnCopyInvite" HorizontalAlignment="Left" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Copy my invite" Click="OnCopyInvite" />
+                        <Button Content="Show my invite as a QR code" Click="OnShowInvite" />
+                    </StackPanel>
                     <MenuFlyoutSeparator />
                     <TextBlock Text="Add a friend" />
                     <Grid ColumnSpacing="8">
@@ -228,9 +234,16 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <StackPanel>
-                        <TextBlock Text="Device ID" />
-                        <TextBlock Text="{x:Bind Short(Library.DeviceId), Mode=OneWay}" FontFamily="Consolas" IsTextSelectionEnabled="True" Style="{StaticResource Hint}" />
+                    <StackPanel Spacing="8">
+                        <StackPanel>
+                            <TextBlock Text="Device ID" />
+                            <TextBlock Text="{x:Bind Short(Library.DeviceId), Mode=OneWay}" FontFamily="Consolas" IsTextSelectionEnabled="True" Style="{StaticResource Hint}" />
+                        </StackPanel>
+                        <StackPanel Visibility="{x:Bind services:Telemetry.Enabled}">
+                            <TextBlock Text="Telemetry ID" />
+                            <TextBlock Text="{x:Bind services:Telemetry.Id}" FontFamily="Consolas" IsTextSelectionEnabled="True" Style="{StaticResource Hint}" />
+                            <TextBlock Text="This build sends diagnostics to its developer." Style="{StaticResource Hint}" />
+                        </StackPanel>
                     </StackPanel>
                     <Button Grid.Column="1" Content="Open data folder" Click="OnOpenData" VerticalAlignment="Center" />
                 </Grid>

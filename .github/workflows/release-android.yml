@@ -1,0 +1,399 @@
+name: Release / Android app
+
+# Builds the Ursa Android app: the Rust core (crate ursa-ffi) for arm64-v8a and x86_64 with its
+# Kotlin bindings, then the Expo app around it (prebuild + Gradle), into one APK. A push to main
+# that touches the app or the core cuts `android-vX.Y.Z` when its Conventional Commits ship
+# something (scripts/next-version.sh android) and attaches the APK to that GitHub release. Other
+# builds keep the APK as a workflow artifact.
+#
+# Caches: GitHub lets a run read caches saved on its own ref, its base branch or the default
+# branch. Two kinds of saving, then:
+# - Warming: every push to main or android-app builds and saves, so a new pull request's first
+#   build starts from its base branch instead of from nothing.
+# - Iteration: pull requests save too. Those entries are readable by that pull request alone, and
+#   its next push restores them first (a restore looks in the run's own ref before the base), so
+#   only what changed since its last push is rebuilt. cache-cleanup.yml deletes them when the pull
+#   request closes, so they do not sit in the repository's 10 GB evicting the shared entries.
+# The Rust target, ccache and Gradle keys leave the ABIs out: a release (arm64-v8a and x86_64)
+# fills a superset of what an arm64-only pull-request build reads.
+#
+# Signing: with the ANDROID_KEYSTORE_B64 secret (plus ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS
+# and ANDROID_KEY_PASSWORD) the APK is signed with that key; without it, with the Expo template's
+# debug key. Android only installs an update signed by the same key as the installed app.
+
+on:
+  push:
+    # main releases; android-app (where the app lives until it merges) only warms the caches its
+    # pull requests read.
+    branches: [main, android-app]
+    paths:
+      - apps/android/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/**
+      - scripts/next-version.sh
+      - .github/workflows/release-android.yml
+  pull_request:
+    paths:
+      - apps/android/**
+      - crates/ursa-ffi/**
+      - crates/ursa-client/**
+      - crates/ursa-core/**
+      - crates/ursa-proto/**
+      - .github/workflows/release-android.yml
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release to cut. `auto` follows the Conventional Commits since the last android tag.
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      release: ${{ steps.ver.outputs.release }}
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: ver
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          set -euo pipefail
+          out="$(bash scripts/next-version.sh android --force "$BUMP")"
+          echo "$out"
+          release="$(sed -n 's/^release=//p' <<<"$out")"
+          version="$(sed -n 's/^version=//p' <<<"$out")"
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then release=false; fi
+          if [[ "$release" != "true" ]]; then version="${version}-ci.${GITHUB_RUN_NUMBER}"; fi
+          {
+            echo "release=${release}"
+            echo "version=${version}"
+            echo "tag=$(sed -n 's/^tag=//p' <<<"$out")"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      URSA_VERSION: ${{ needs.version.outputs.version }}
+      URSA_VERSION_CODE: ${{ github.run_number }}
+      # Developer telemetry: the JS layer and the Rust core send their logs as OTLP to the
+      # collector this repository variable names (src/core/telemetry.ts). Unset sends nothing.
+      EXPO_PUBLIC_OTEL_ENDPOINT: ${{ vars.OTEL_ENDPOINT }}
+      # Anything but main builds for a test phone: arm64 only (x86_64 is for emulators and doubled
+      # both the Rust and the C++ work) and no R8. Releases ship both ABIs, shrunk.
+      FAST: ${{ github.ref != 'refs/heads/main' }}
+      ABIS: ${{ github.ref != 'refs/heads/main' && 'arm64-v8a' || 'arm64-v8a x86_64' }}
+      # Gradle reuses task outputs across runs only with its build cache on (setup-gradle saves
+      # ~/.gradle/caches/build-cache-1 with the rest of Gradle's home).
+      GRADLE_OPTS: -Dorg.gradle.caching=true -Dorg.gradle.parallel=true -Dorg.gradle.jvmargs=-Xmx5g
+    steps:
+      - uses: actions/checkout@v4
+
+      # A hosted runner's root disk has ~20 GB free, and this job fills it from both ends: the
+      # restored caches (Cargo target, Gradle, ccache) and then the Rust core, the CMake trees and
+      # Gradle's intermediates. The first build with the caches on died in Gradle with "No space
+      # left on device". These toolchains ship on the image and nothing here uses them. This runs
+      # before the restores, so they unpack into the space it frees.
+      - name: Free disk space
+        run: |
+          df -h /
+          for path in /usr/share/dotnet /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/share/powershell /usr/share/swift; do
+            [[ -e "$path" ]] && sudo rm -rf -- "$path" &
+          done
+          wait
+          df -h /
+
+      # The runner has 16 GB of memory and no swap. With Gradle's 5 GB heap, the Kotlin daemon and
+      # parallel CMake workers, the first full build was killed during R8 ("The runner has
+      # received a shutdown signal"), as Street Cryptid's release builds were before they got swap.
+      - name: Add swap
+        run: |
+          sudo fallocate -l 8G /ursa-build.swap
+          sudo chmod 600 /ursa-build.swap
+          sudo mkswap /ursa-build.swap > /dev/null
+          sudo swapon /ursa-build.swap
+          swapon --show
+          free -h
+
+      - name: Rust
+        id: rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          echo "rustc=$(rustc -V | tr -cs 'A-Za-z0-9.' '-')" >> "$GITHUB_OUTPUT"
+
+      # The built core: the library and its bindings, together (UniFFI aborts at load when the
+      # two disagree, so neither is ever restored without the other). Keyed by everything the
+      # build reads, so a hit skips the Rust build entirely and a miss rebuilds from scratch. Exact
+      # keys only: an arm64-only build never takes a release's core or the other way round (Street
+      # Cryptid's previews failed repeatedly with that fallback, and never on a miss).
+      - name: Restore the built core
+        id: core
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            apps/android/modules/ursa-core/android/src/main/jniLibs
+            apps/android/modules/ursa-core/android/src/main/java/uniffi
+          key: ursa-core-${{ steps.rust.outputs.rustc }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh') }}-${{ env.ABIS }}
+
+      - name: Rust targets
+        if: steps.core.outputs.cache-hit != 'true'
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+      - name: Restore the Cargo cache
+        id: cargo
+        uses: Swatinem/rust-cache@v2
+        if: steps.core.outputs.cache-hit != 'true'
+        with:
+          shared-key: android
+          # rust-cache's post step only saves after a success by default, so a build that died
+          # after compiling for twenty minutes left the next one just as cold.
+          cache-on-failure: 'true'
+      - uses: taiki-e/install-action@v2
+        if: steps.core.outputs.cache-hit != 'true'
+        with:
+          tool: cargo-ndk
+      - name: Build the core and its Kotlin bindings
+        if: steps.core.outputs.cache-hit != 'true'
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          # shellcheck disable=SC2086
+          bash apps/android/scripts/build-core.sh $ABIS
+      # Saved at once, not at the end of the job: a build that dies later (it has, twice) would
+      # otherwise leave nothing behind, and the next one would build the core again.
+      - name: Save the built core
+        if: steps.core.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            apps/android/modules/ursa-core/android/src/main/jniLibs
+            apps/android/modules/ursa-core/android/src/main/java/uniffi
+          key: ${{ steps.core.outputs.cache-primary-key }}
+
+      - uses: oven-sh/setup-bun@v2
+      # Bun's download cache: without it every run fetched all ~780 packages again. Saved when the
+      # lockfile changes (an exact hit skips the save), restored from the newest one otherwise.
+      - name: Bun download cache
+        id: bun
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ursa-bun-${{ runner.os }}-${{ hashFiles('apps/android/bun.lock') }}
+          restore-keys: ursa-bun-${{ runner.os }}-
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      # By default only the default branch saves. android-app must too (its pull requests read from
+      # it), and so do pull requests, so a pull request's next push finds this one's task outputs.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      # React Native's libraries build their C++ through CMake (the `buildCMake*` tasks), which
+      # Gradle's build cache does not cover. CMake takes its compiler launcher from the
+      # environment, so every library's configure goes through ccache.
+      - name: ccache
+        run: |
+          sudo apt-get install -y -qq ccache > /dev/null
+          ccache --version | head -1
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_MAXSIZE=3G"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_NOHASHDIR=true"
+            # The NDK is installed afresh each run, so the default (the compiler's mtime) would
+            # call every compiler new. Its version output names it, install directory included.
+            echo "CCACHE_COMPILERCHECK=%compiler% -v"
+            # As Street Cryptid found: without these, half the compiles miss on precompiled
+            # headers and on headers generated just before they are compiled.
+            echo "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime,system_headers"
+            echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+          } >> "$GITHUB_ENV"
+      # A new entry every run (an exact hit never saves, so a fixed key would freeze), restored
+      # from the newest one: this pull request's last build, else its base branch's or main's.
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ursa-ccache-${{ hashFiles('apps/android/bun.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            ursa-ccache-${{ hashFiles('apps/android/bun.lock') }}-
+            ursa-ccache-
+      - run: ccache --zero-stats > /dev/null
+
+      # Metro's transform cache, for the JS bundle Gradle builds (createBundleReleaseJsAndAssets).
+      # Expo's Metro config has a build-runner mode: with both directories set it reads entries
+      # from RESTORE and writes every entry this bundle used, hits included, to OUTPUT, so the saved
+      # entry is exactly this build's working set and never grows. Metro keys each transform by
+      # file content and transformer config, so a stale entry is a miss, never a wrong transform.
+      # The second hash is the JS itself: a native-only push is an exact hit and saves nothing.
+      - name: Point Metro at its cache directories
+        run: |
+          mkdir -p "$RUNNER_TEMP/metro-cache" "$RUNNER_TEMP/metro-cache-output"
+          {
+            echo "EXPO_METRO_CACHE_RESTORE_DIR=$RUNNER_TEMP/metro-cache"
+            echo "EXPO_METRO_CACHE_OUTPUT_DIR=$RUNNER_TEMP/metro-cache-output"
+          } >> "$GITHUB_ENV"
+      - name: Restore the Metro cache
+        id: metro
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ursa-metro-${{ hashFiles('apps/android/bun.lock', 'apps/android/app.json', 'apps/android/app.config.ts', 'apps/android/babel.config.js', 'apps/android/metro.config.js') }}-${{ hashFiles('apps/android/src/**', 'apps/android/assets/**', 'apps/android/modules/*/index.ts') }}
+          restore-keys: |
+            ursa-metro-${{ hashFiles('apps/android/bun.lock', 'apps/android/app.json', 'apps/android/app.config.ts', 'apps/android/babel.config.js', 'apps/android/metro.config.js') }}-
+            ursa-metro-
+
+      - name: Install and check the app
+        working-directory: apps/android
+        run: |
+          bun install --frozen-lockfile
+          bunx tsc --noEmit
+          bunx eslint src modules/ursa-core/index.ts
+
+      - name: Prebuild
+        working-directory: apps/android
+        run: bunx expo prebuild --platform android --no-install
+
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [[ -n "${KEYSTORE_B64}" ]]; then
+            echo "${KEYSTORE_B64}" | base64 -d > "$RUNNER_TEMP/ursa.keystore"
+            echo "URSA_KEYSTORE_PATH=$RUNNER_TEMP/ursa.keystore" >> "$GITHUB_ENV"
+            echo "Signing with the release key."
+          else
+            echo "::warning::ANDROID_KEYSTORE_B64 is not set: the APK is signed with the Expo template's debug key."
+          fi
+
+      - name: Gradle
+        working-directory: apps/android/android
+        env:
+          URSA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          URSA_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          URSA_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          # Only the ABIs the core was built for.
+          archs="$(tr ' ' ',' <<<"$ABIS")"
+          # R8 was 5 of a warm pull-request build's 9 minutes, and nothing caches it. An APK built
+          # off main is for a test phone, so it skips R8 and resource shrinking; anything built on
+          # main (a release, or a dispatch) still runs both, so the keep rules are exercised
+          # before an APK ships.
+          shrink=()
+          if [[ "$FAST" == "true" ]]; then
+            shrink=(-Pandroid.enableMinifyInReleaseBuilds=false -Pandroid.enableShrinkResourcesInReleaseBuilds=false)
+          fi
+          ./gradlew :app:assembleRelease --no-daemon --build-cache -PreactNativeArchitectures="$archs" "${shrink[@]}"
+
+      # The hit rate is the point of the cache, so it goes in the log.
+      - name: ccache statistics
+        if: '!cancelled()'
+        run: ccache --show-stats || true
+      # Saved even after a failed build, so what it compiled still warms the next one.
+      - name: Save ccache
+        if: '!cancelled()'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+      # actions/cache folds the path into an entry's identity, so the output moves to the path the
+      # restore reads from before it is saved.
+      - name: Stage the Metro cache
+        if: ${{ !cancelled() && steps.metro.outputs.cache-hit != 'true' }}
+        run: |
+          out="$RUNNER_TEMP/metro-cache-output"
+          [[ -d "$out" && -n "$(ls -A "$out")" ]] || { echo "Metro wrote nothing to save."; exit 0; }
+          echo "Metro: restored $(find "$RUNNER_TEMP/metro-cache" -type f | wc -l) entries, this bundle used $(find "$out" -type f | wc -l)."
+          rm -rf -- "$RUNNER_TEMP/metro-cache"
+          mv -- "$out" "$RUNNER_TEMP/metro-cache"
+      - name: Save the Metro cache
+        if: ${{ !cancelled() && steps.metro.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ${{ steps.metro.outputs.cache-primary-key }}
+
+      # A build that took longer than it should is almost always one whose caches missed, so the
+      # summary says which did. "partial" is a restore from an older entry (a fallback key).
+      - name: Cache report
+        if: '!cancelled()'
+        env:
+          CORE: ${{ steps.core.outputs.cache-hit }}
+          CARGO: ${{ steps.core.outputs.cache-hit == 'true' && 'skipped (core cached)' || steps.cargo.outputs.cache-hit }}
+          BUN: ${{ steps.bun.outputs.cache-hit }}
+          METRO: ${{ steps.metro.outputs.cache-hit }}
+          METRO_MATCH: ${{ steps.metro.outputs.cache-matched-key }}
+          CCACHE_MATCH: ${{ steps.ccache.outputs.cache-matched-key }}
+        run: |
+          state() { if [[ "$1" == true ]]; then echo hit; elif [[ -n "$2" ]]; then echo partial; else echo miss; fi; }
+          {
+            echo "### Caches"
+            echo
+            echo "| Cache | Result |"
+            echo "| --- | --- |"
+            echo "| Built core (skips Rust) | $([[ "$CORE" == true ]] && echo hit || echo miss) |"
+            echo "| Cargo | ${CARGO:-miss} |"
+            echo "| Bun downloads | $([[ "$BUN" == true ]] && echo hit || echo "miss or older entry") |"
+            echo "| Metro transforms | $(state "$METRO" "$METRO_MATCH") |"
+            echo "| ccache | $([[ -n "$CCACHE_MATCH" ]] && echo "restored from ${CCACHE_MATCH##*-}" || echo miss) |"
+            echo
+            echo '```'
+            ccache --show-stats 2>/dev/null | grep -E 'Hits|Misses|Cacheable' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the core shipped
+        run: |
+          set -euo pipefail
+          apk="$(ls apps/android/android/app/build/outputs/apk/release/*.apk | head -n 1)"
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/libursa_ffi.so'
+          mkdir -p dist
+          cp "$apk" "dist/Ursa-${URSA_VERSION}.apk"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ursa-android
+          path: dist
+
+  release:
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ursa-android
+          path: dist
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/*.apk --target "$GITHUB_SHA" --title "Ursa for Android ${VERSION}" \
+            --notes "Preview APK (arm64 phones and x86_64 emulators). Install it from the file; updates are not automatic."

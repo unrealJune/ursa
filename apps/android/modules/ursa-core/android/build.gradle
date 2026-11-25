@@ -1,0 +1,38 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+group = 'com.unrealjune.ursa.core'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(
+  project(":expo-modules-core").projectDir.absolutePath,
+  "ExpoModulesCorePlugin.gradle"
+)
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+android {
+  namespace "com.unrealjune.ursa.core"
+  compileSdk safeExtGet("compileSdkVersion", 36)
+
+  defaultConfig {
+    minSdk safeExtGet("minSdkVersion", 29)
+    consumerProguardFiles "consumer-rules.pro"
+  }
+
+  // libursa_ffi.so per ABI, from scripts/build-core.sh: src/main/jniLibs/<abi>/libursa_ffi.so
+  sourceSets {
+    main {
+      jniLibs.srcDirs += ['src/main/jniLibs']
+    }
+  }
+}
+
+dependencies {
+  // JNA must be the @aar variant on Android: it carries libjnidispatch.so for each ABI.
+  implementation "net.java.dev.jna:jna:5.14.0@aar"
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1"
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
+}

@@ -1,0 +1,9 @@
+node_modules/
+.expo/
+expo-env.d.ts
+# `expo prebuild` output: the app is configured from app.json and the module's own android/.
+/android/
+# Built by scripts/build-core.sh (and CI): the Rust library and its generated Kotlin bindings.
+modules/ursa-core/android/src/main/jniLibs/
+modules/ursa-core/android/src/main/java/uniffi/
+modules/ursa-core/android/build/

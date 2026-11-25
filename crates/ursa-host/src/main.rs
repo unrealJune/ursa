@@ -61,6 +61,8 @@ enum Command {
     LinkDecide { accept: bool },
     LinkCancel,
     Status,
+    /// Re-reads the account from its nodes, then answers like `status`.
+    Refresh,
     Pool,
     Claim { link: String, #[serde(default)] label: String },
     ForgetNode { node_id: String },
@@ -113,10 +115,13 @@ struct Host {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,iroh=warn,noq=warn".into()))
-        .init();
+    // stdout is the protocol, so log lines go to stderr. The app passes the collector and its
+    // telemetry id in the OTEL_* environment.
+    ursa_telemetry::init_console(
+        "info,iroh=warn,noq=warn",
+        true,
+        ursa_telemetry::Config::from_env("ursa-windows", "host", env!("CARGO_PKG_VERSION")),
+    );
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
@@ -155,7 +160,11 @@ async fn main() -> Result<()> {
                     }
                     v
                 }
-                Err(e) => json!({ "id": id, "ok": false, "error": format!("{e:#}") }),
+                Err(e) => {
+                    // The app shows it; this is what makes it visible in the collector too.
+                    tracing::warn!("command failed: {e:#}");
+                    json!({ "id": id, "ok": false, "error": format!("{e:#}") })
+                }
             });
         });
     }
@@ -164,6 +173,7 @@ async fn main() -> Result<()> {
     }
     drop(tx);
     let _ = writer.await;
+    ursa_telemetry::flush();
     Ok(())
 }
 
@@ -251,9 +261,16 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
             let device = host.device().await?;
             let (dn, pf) = host.names.lock().await.clone();
             let o = out.clone();
-            let (_, s) = device.join(&code, &dn, &pf, move |c| o.event("link_confirm", json!({ "code": c }))).await?;
-            let v = Host::account_result(&s);
-            *host.session.lock().await = Some(s);
+            let linked = device.join(&code, &dn, &pf, move |c| o.event("link_confirm", json!({ "code": c }))).await?;
+            let mut v = Host::account_result(&linked.session);
+            // The other device's relays, which this device now runs on: the app keeps them for
+            // its next start. Joining may have restarted the device on them.
+            if let Some(n) = &linked.network {
+                v["relays"] = json!(n.relays);
+                v["relay_token"] = json!(n.relay_token);
+            }
+            *host.device.lock().await = Some(linked.session.device.clone());
+            *host.session.lock().await = Some(linked.session);
             Ok(v)
         }
         Command::LinkOffer => {
@@ -285,6 +302,10 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
             Ok(json!({}))
         }
         Command::Status => host.status().await,
+        Command::Refresh => {
+            host.session().await?.refresh().await?;
+            host.status().await
+        }
         Command::Pool => Ok(json!({ "nodes": host.session().await?.pool().await })),
         Command::Claim { link, label } => {
             let s = host.session().await?;
