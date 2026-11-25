@@ -22,6 +22,8 @@ export default function MainLayout() {
       <Stack.Screen name="nodes" options={{ title: 'Nodes' }} />
       <Stack.Screen name="add-node" options={{ title: 'Add a node' }} />
       <Stack.Screen name="friends" options={{ title: 'Friends' }} />
+      <Stack.Screen name="pool" options={{ title: 'Pool' }} />
+      <Stack.Screen name="usage" options={{ title: 'Usage' }} />
       <Stack.Screen name="recovery" options={{ title: 'Recovery' }} />
     </Stack>
   );

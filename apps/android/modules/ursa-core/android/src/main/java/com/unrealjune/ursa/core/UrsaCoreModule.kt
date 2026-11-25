@@ -244,6 +244,46 @@ class UrsaCoreModule : Module() {
       }
     }
 
+    /** The storage report (protection, capacity, usage) as the core's JSON; `k`/`n` add a shape to the choices. */
+    AsyncFunction("storage") Coroutine { k: Int?, n: Int? ->
+      call { core.storageJson(k?.toUShort(), n?.toUShort()) }
+    }
+
+    /** Chooses the code for the account's files; both null: automatic. */
+    AsyncFunction("setProtection") Coroutine { k: Int?, n: Int? ->
+      call { core.setProtection(k?.toUShort(), n?.toUShort()) }
+    }
+
+    /** Moves every file to the chosen protection, with progress on `task`. */
+    AsyncFunction("recode") Coroutine { task: String ->
+      call {
+        val r = core.recode(progress(task))
+        mapOf(
+          "files" to r.files.toDouble(),
+          "recodedFiles" to r.recodedFiles.toDouble(),
+          "objectsRecoded" to r.objectsRecoded.toDouble(),
+          "shardsDeleted" to r.shardsDeleted.toDouble(),
+          "failures" to r.failures,
+        )
+      }
+    }
+
+    AsyncFunction("setGive") Coroutine { bytes: Double -> call { core.setGive(bytes.toLong().toULong()) } }
+
+    /** Deletes pieces nothing uses that are older than `graceHours` (null: the core's default). */
+    AsyncFunction("collectGarbage") Coroutine { graceHours: Double? ->
+      call {
+        val r = core.collectGarbage(graceHours)
+        mapOf(
+          "nodesSwept" to r.nodesSwept.toDouble(),
+          "nodesSkipped" to r.nodesSkipped.toDouble(),
+          "deleted" to r.deleted.toDouble(),
+          "bytesFreed" to r.bytesFreed.toDouble(),
+          "keptYoung" to r.keptYoung.toDouble(),
+        )
+      }
+    }
+
     AsyncFunction("signOut") Coroutine { ->
       call { core.signOut() }
       File(context.cacheDir, "files").deleteRecursively()

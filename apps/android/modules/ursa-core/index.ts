@@ -58,6 +58,10 @@ export type PoolNode = {
 
 export type RepairReport = { files: number; objectsChecked: number; objectsRebuilt: number; unrecoverable: string[] };
 
+export type RecodeReport = { files: number; recodedFiles: number; objectsRecoded: number; shardsDeleted: number; failures: string[] };
+
+export type GcReport = { nodesSwept: number; nodesSkipped: number; deleted: number; bytesFreed: number; keptYoung: number };
+
 export type UploadMeta = { name?: string; mime?: string; createdMs?: number; modifiedMs?: number; width?: number; height?: number };
 
 type Events = {
@@ -110,6 +114,16 @@ declare class UrsaCoreModule extends NativeModule<Events> {
   /** Several files in one library change (one index upload, one head save). */
   deleteMany(fileIds: string[]): Promise<void>;
   repair(task: string): Promise<RepairReport>;
+  /** The storage report as JSON (see `src/core/storage.ts`); `k`/`n` add a shape being considered. */
+  storage(k: number | null, n: number | null): Promise<string>;
+  /** Chooses the code for the account's files: any `k` of `n` pieces rebuild one. Both null: automatic. */
+  setProtection(k: number | null, n: number | null): Promise<void>;
+  /** Moves every file to the chosen protection and deletes the old pieces; safe to stop and run again. */
+  recode(task: string): Promise<RecodeReport>;
+  /** Gives every friend an equal share of `bytes` on each node this account owns. */
+  setGive(bytes: number): Promise<void>;
+  /** Deletes pieces nothing uses that are older than `graceHours` (null: 72). */
+  collectGarbage(graceHours: number | null): Promise<GcReport>;
   signOut(): Promise<void>;
 }
 

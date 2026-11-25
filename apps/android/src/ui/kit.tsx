@@ -129,25 +129,29 @@ export function IconButton({
   label,
   color,
   size = 24,
+  disabled,
 }: {
   icon: IconName | string;
   onPress: () => void;
   label: string;
   color?: string;
   size?: number;
+  disabled?: boolean;
 }) {
   const { c } = useTheme();
   return (
     <View style={styles.iconButtonWrap}>
       <Pressable
         onPress={onPress}
+        disabled={disabled}
         accessibilityRole="button"
         accessibilityLabel={label}
+        accessibilityState={{ disabled: !!disabled }}
         android_ripple={{ color: withAlpha(c.onSurface, 0.12), borderless: true, radius: 20 }}
         style={styles.iconButton}
         hitSlop={4}
       >
-        <Icon name={icon} size={size} color={color ?? c.onSurfaceVariant} />
+        <Icon name={icon} size={size} color={disabled ? withAlpha(c.onSurface, 0.38) : (color ?? c.onSurfaceVariant)} />
       </Pressable>
     </View>
   );

@@ -53,6 +53,10 @@ export default function Account() {
 
         <SectionHeader>Storage</SectionHeader>
         <Group>
+          <ListRow icon="shield" title="Pool" subtitle="Protection and capacity" onPress={() => router.push('/pool')} />
+          <Divider inset={56} />
+          <ListRow icon="pie-chart-outline" title="Usage" subtitle="What you store and give" onPress={() => router.push('/usage')} />
+          <Divider inset={56} />
           <ListRow icon="dns" title="Nodes" subtitle={`${status.homeNodes.length} of your own · repair`} onPress={() => router.push('/nodes')} />
           <Divider inset={56} />
           <ListRow icon="group" title="Friends" subtitle={friends === 0 ? 'Share space with friends' : `${friends} ${friends === 1 ? 'friend' : 'friends'}`} onPress={() => router.push('/friends')} />

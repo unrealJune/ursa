@@ -174,6 +174,26 @@ pub struct RepairReport {
     pub unrecoverable: Vec<String>,
 }
 
+/// What moving the library to the chosen protection did.
+#[derive(uniffi::Record)]
+pub struct RecodeReport {
+    pub files: u64,
+    pub recoded_files: u64,
+    pub objects_recoded: u64,
+    pub shards_deleted: u64,
+    pub failures: Vec<String>,
+}
+
+/// What a sweep of unused pieces did.
+#[derive(uniffi::Record)]
+pub struct GcReport {
+    pub nodes_swept: u64,
+    pub nodes_skipped: u64,
+    pub deleted: u64,
+    pub bytes_freed: u64,
+    pub kept_young: u64,
+}
+
 /// Progress of a long call. Called at most every 100 ms, and always for the last step.
 #[uniffi::export(with_foreign)]
 pub trait ProgressListener: Send + Sync {
@@ -825,6 +845,75 @@ impl UrsaCore {
                 objects_checked: r.objects_checked as u64,
                 objects_rebuilt: r.objects_rebuilt as u64,
                 unrecoverable: r.unrecoverable,
+            })
+        })
+        .await
+    }
+
+    /// Everything the Pool and Usage screens show, as JSON: the same report the Windows host
+    /// sends (`ursa_client::storage::StorageReport`), so both apps read one shape. `k` and `n`
+    /// add a shape being considered to the choices.
+    pub async fn storage_json(&self, k: Option<u16>, n: Option<u16>) -> Res<String> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            let extra = k.zip(n).map(|(k, n)| ursa_client::storage::Shape { k, n });
+            let report = inner.session().await?.storage(extra).await?;
+            Ok(serde_json::to_string(&report)?)
+        })
+        .await
+    }
+
+    /// Chooses the code for the account's files (`k` of `n` pieces rebuild one); neither:
+    /// picked from the pool's size. [`UrsaCore::recode`] moves the files already stored.
+    pub async fn set_protection(&self, k: Option<u16>, n: Option<u16>) -> Res<()> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            let shape = match (k, n) {
+                (Some(k), Some(n)) => Some(ursa_client::storage::Shape { k, n }),
+                (None, None) => None,
+                _ => bail!("give both k and n, or neither"),
+            };
+            inner.session().await?.set_protection(shape).await
+        })
+        .await
+    }
+
+    /// Moves every file to the chosen protection and deletes the old pieces. Safe to stop and
+    /// run again: a later run finishes it and clears what this one left.
+    pub async fn recode(&self, listener: Arc<dyn ProgressListener>) -> Res<RecodeReport> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            let progress = throttled(listener);
+            let r = inner.session().await?.recode(progress).await?;
+            Ok(RecodeReport {
+                files: r.files as u64,
+                recoded_files: r.recoded_files as u64,
+                objects_recoded: r.objects_recoded as u64,
+                shards_deleted: r.shards_deleted as u64,
+                failures: r.failures,
+            })
+        })
+        .await
+    }
+
+    /// Gives every friend an equal share of `bytes` on each node this account owns.
+    pub async fn set_give(&self, bytes: u64) -> Res<()> {
+        let inner = self.inner.clone();
+        on_rt(async move { inner.session().await?.set_give(bytes).await }).await
+    }
+
+    /// Deletes pieces nothing references that are older than `grace_hours` (default 72).
+    pub async fn collect_garbage(&self, grace_hours: Option<f64>) -> Res<GcReport> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            let grace = grace_hours.map_or(ursa_client::gc::DEFAULT_GRACE, |h| Duration::from_secs_f64(h.max(0.0) * 3600.0));
+            let r = inner.session().await?.collect_garbage(grace).await?;
+            Ok(GcReport {
+                nodes_swept: r.nodes_swept as u64,
+                nodes_skipped: r.nodes_skipped.len() as u64,
+                deleted: r.deleted,
+                bytes_freed: r.bytes_freed,
+                kept_young: r.kept_young as u64,
             })
         })
         .await

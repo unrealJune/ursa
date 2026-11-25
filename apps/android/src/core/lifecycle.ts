@@ -3,6 +3,7 @@ import { AppState } from 'react-native';
 import { libraryOpened, resetLibrary, syncIfStale } from './library';
 import { session, start } from './session';
 import { watch } from './state';
+import { resumeStorage } from './storage';
 import { forgetThumbs } from './thumbs';
 import { backupNow, commitUploads, resetUploads } from './uploads';
 
@@ -31,6 +32,7 @@ export function boot() {
       if (phase === 'ready' && prev !== 'ready') {
         libraryOpened();
         if (session.get().prefs.backup) backupNow();
+        resumeStorage();
       }
       if (phase === 'welcome') {
         resetLibrary();
