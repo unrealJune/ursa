@@ -119,6 +119,12 @@ enum Cmd {
     Storage,
     /// Give friends this much space in total on your nodes, split equally.
     Give { gb: f64 },
+    /// Delete pieces nothing references (left by stopped uploads and switches, deleted files,
+    /// old indexes) that are older than the grace period.
+    Gc {
+        #[arg(long, default_value_t = 72.0)]
+        grace_hours: f64,
+    },
 }
 
 fn root_path(profile: &Path) -> PathBuf {
@@ -314,6 +320,11 @@ async fn run(cli: &Cli, device: &Arc<Device>, platform: &str) -> Result<()> {
         Cmd::Storage => {
             let s = session(cli, device, platform).await?;
             println!("{}", serde_json::to_string_pretty(&s.storage(None).await?)?);
+        }
+        Cmd::Gc { grace_hours } => {
+            let s = session(cli, device, platform).await?;
+            let r = s.collect_garbage(std::time::Duration::from_secs_f64(grace_hours * 3600.0)).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
         }
         Cmd::Give { gb } => {
             let s = session(cli, device, platform).await?;

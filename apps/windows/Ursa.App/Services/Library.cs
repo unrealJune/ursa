@@ -262,13 +262,17 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         _ = RecodeInBackgroundAsync();
     }
 
-    /// <summary>At start: finishes a switch that was cut short.</summary>
+    /// <summary>
+    /// At start: finishes a switch that was cut short (and clears what it left), then sweeps
+    /// pieces nothing uses that are old enough to be sure of. Quiet: the next start tries again.
+    /// </summary>
     private async Task ResumeSwitchAsync()
     {
         try
         {
             var r = await StorageAsync();
-            if (r.Chosen && r.PendingFiles > 0) _ = RecodeInBackgroundAsync();
+            if (r.PendingFiles > 0 || r.LeftoverPieces > 0) await RecodeInBackgroundAsync();
+            await host.CallAsync("gc");
         }
         catch { /* nodes down: the next start tries again */ }
     }

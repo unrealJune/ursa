@@ -244,15 +244,22 @@ impl Node {
                 }
                 Response { have, ..Response::ok() }
             }
-            Request::Delete { ids } => {
-                let mut freed = 0;
+            Request::Delete { ids, older_than_ms } => {
+                let (mut freed, mut deleted) = (0, 0);
                 for id in &ids {
-                    freed += store.delete(&account, id).await?;
+                    if let Some(f) = store.delete(&account, id, older_than_ms).await? {
+                        freed += f;
+                        deleted += 1;
+                    }
                 }
                 let mut usage = self.inner.usage.lock().await;
                 let u = usage.entry(account).or_default();
                 *u = u.saturating_sub(freed);
-                Response::ok()
+                Response { deleted: Some(deleted), freed: Some(freed), ..Response::ok() }
+            }
+            Request::List { after, limit } => {
+                let objects = store.list(&account, after, limit.min(ursa_proto::LIST_PAGE) as usize).await?;
+                Response { objects, ..Response::ok() }
             }
             Request::HeadGet => {
                 let head = match store.head(&account).await? {

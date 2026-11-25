@@ -37,7 +37,7 @@ public sealed record MonthBytes(string Month, long Bytes)
 
 /// <summary>What the host's <c>storage</c> command reports: everything the Pool and Usage pages show.</summary>
 public sealed record StorageReport(
-    int K, int N, bool Chosen, int Files, int PendingFiles,
+    int K, int N, bool Chosen, int Files, int PendingFiles, int LeftoverPieces,
     long StoredBytes, long Photos, long Videos, long OtherFiles,
     long LimitBytes, IReadOnlyList<Choice> Choices,
     long GiveBytes, long HomeBytes, long FriendsBytes,
@@ -56,6 +56,7 @@ public sealed record StorageReport(
         return new StorageReport(
             p.GetProperty("k").GetInt32(), p.GetProperty("n").GetInt32(), r.GetProperty("chosen").GetBoolean(),
             r.GetProperty("files").GetInt32(), r.GetProperty("pending_files").GetInt32(),
+            r.TryGetProperty("leftover_pieces", out var lp) ? lp.GetInt32() : 0,
             r.GetProperty("stored_bytes").GetInt64(), kinds.GetProperty("photos").GetInt64(), kinds.GetProperty("videos").GetInt64(), kinds.GetProperty("files").GetInt64(),
             r.GetProperty("limit_bytes").GetInt64(),
             r.GetProperty("choices").EnumerateArray().Select(Choice.FromJson).ToList(),

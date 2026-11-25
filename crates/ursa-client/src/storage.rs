@@ -13,7 +13,7 @@ use ursa_core::manifest::{self, FileManifest, ShardSet};
 use ursa_proto::Role;
 
 use crate::capacity::{self, Choice, UNKNOWN_UP};
-use crate::library::rand_usize;
+use crate::gc::{Piece, pieces, placement};
 use crate::objects::{auto_code, codes_for};
 use crate::{Session, now_ms, short};
 
@@ -93,6 +93,8 @@ pub struct StorageReport {
     pub files: usize,
     /// Files not yet in `protection` (a switch not finished, or uploads while nodes were down).
     pub pending_files: usize,
+    /// Pieces a stopped switch on this device wrote and never committed; a re-code clears them.
+    pub leftover_pieces: usize,
     pub stored_bytes: u64,
     pub kinds: Kinds,
     /// Chunk objects by code, `k-of-n` → count.
@@ -286,6 +288,7 @@ impl Session {
             chosen: state.protection.is_some(),
             files: files.len(),
             pending_files,
+            leftover_pieces: self.journal().entries.len(),
             stored_bytes,
             kinds,
             codes,
@@ -303,8 +306,14 @@ impl Session {
 
     /// Moves every file to the account's protection: re-codes chunks, thumbnails and manifests
     /// that use another code, commits the index in batches, and after each commit deletes the
-    /// old pieces nothing references any more. Safe to stop and run again.
+    /// old pieces nothing references any more. Safe to stop at any point and run again: pieces
+    /// go where their id says, so a re-run re-uses what the last one wrote, and what it wrote
+    /// and never committed (in this device's journal) is deleted once nothing references it.
     pub async fn recode(&self, progress: impl Fn(u64, u64)) -> Result<RecodeReport> {
+        // Deletes below only take pieces not put since now: a writer elsewhere keeps its pieces.
+        let started = now_ms();
+        let mut journal = self.journal();
+        let stale = journal.entries.clone();
         let writable = self.writable().await;
         let state = self.state().await;
         let target = state.protection.unwrap_or_else(|| auto_code(writable.len()));
@@ -319,7 +328,6 @@ impl Session {
 
         // Who references each piece (node, shard id) now.
         let mut refs: HashMap<(String, ObjectId), usize> = HashMap::new();
-        let pieces = |set: &ShardSet| set.shards.iter().map(|s| (s.node.clone(), s.id)).collect::<Vec<_>>();
         for (_, e, m) in &files {
             for set in m.chunks.iter().chain(m.thumb.iter()).filter_map(|c| c.shards.as_ref()).chain(e.at.iter()) {
                 for p in pieces(set) {
@@ -346,6 +354,7 @@ impl Session {
         for batch in todo.chunks(RECODE_BATCH) {
             let mut moved: Vec<(ObjectId, ObjectId, ShardSet, i64)> = Vec::new();
             let mut released: Vec<(String, ObjectId)> = Vec::new();
+            let mut written: HashSet<Piece> = HashSet::new();
             for (id, e, m) in batch {
                 let mut m = m.clone();
                 let r: Result<()> = async {
@@ -365,7 +374,9 @@ impl Session {
                             Some(s) if s.code == want => s.clone(),
                             _ => {
                                 let bytes = self.fetch_object(&c.id, &old).await?;
-                                let s = self.store_object(&bytes, want, &writable, rand_usize()).await?;
+                                let s = self.store_object(&bytes, want, &writable, placement(&c.id)).await?;
+                                journal.add(pieces(&s));
+                                written.extend(pieces(&s));
                                 recoded.insert(c.id, s.clone());
                                 report.objects_recoded += 1;
                                 s
@@ -388,7 +399,9 @@ impl Session {
                     continue;
                 }
                 let (nid, sealed) = manifest::seal(self.account.root(), &m);
-                let at = self.store_object(&sealed, small, &writable, rand_usize()).await?;
+                let at = self.store_object(&sealed, small, &writable, placement(&nid)).await?;
+                journal.add(pieces(&at));
+                written.extend(pieces(&at));
                 kept.extend(pieces(&at));
                 if let Some(old) = &e.at {
                     released.extend(pieces(old));
@@ -406,9 +419,22 @@ impl Session {
                 }
             })
             .await?;
+            // Committed: these are referenced now, not leftovers.
+            journal.remove(&written);
             if may_delete {
-                report.shards_deleted += self.release(&mut refs, &kept, released).await;
+                report.shards_deleted += self.release(&mut refs, &kept, released, started).await;
             }
+        }
+
+        // What an earlier run wrote and never committed: delete what nothing references.
+        if !stale.is_empty()
+            && let Some((_, now_refs)) = self.referenced().await?
+        {
+            let (live, orphans): (Vec<Piece>, Vec<Piece>) = stale.into_iter().partition(|p| now_refs.contains(p));
+            let (deleted, _, mut handled) = self.delete_pieces(orphans, started).await;
+            report.shards_deleted += deleted as usize;
+            handled.extend(live);
+            journal.remove(&handled);
         }
         progress(total, total);
         info!(?report, "re-code finished");
@@ -416,29 +442,19 @@ impl Session {
     }
 
     /// Drops one reference to each piece; deletes the pieces nobody references any more (and
-    /// that no new set reuses). Returns how many were deleted. A node that cannot be reached
-    /// keeps its old pieces until its lease runs out.
-    async fn release(&self, refs: &mut HashMap<(String, ObjectId), usize>, kept: &HashSet<(String, ObjectId)>, released: Vec<(String, ObjectId)>) -> usize {
-        let mut by_node: HashMap<String, Vec<ObjectId>> = HashMap::new();
+    /// that no new set reuses), unless a node has had them put since `started`. Returns how
+    /// many were deleted. A node that cannot be reached keeps them for the sweep.
+    async fn release(&self, refs: &mut HashMap<Piece, usize>, kept: &HashSet<Piece>, released: Vec<Piece>, started: i64) -> usize {
+        let mut gone = Vec::new();
         for p in released {
             let r = refs.entry(p.clone()).or_insert(1);
             *r = r.saturating_sub(1);
             if *r == 0 && !kept.contains(&p) {
                 refs.remove(&p);
-                by_node.entry(p.0).or_default().push(p.1);
+                gone.push(p);
             }
         }
-        let state = self.state().await;
-        let mut deleted = 0;
-        for (node, ids) in by_node {
-            let r = self.node_ref(&node, &state);
-            let n = ids.len();
-            match async { self.node(&r).await?.delete(ids).await }.await {
-                Ok(()) => deleted += n,
-                Err(e) => warn!(node = %short(&node), "could not delete {n} old pieces: {e:#}"),
-            }
-        }
-        deleted
+        self.delete_pieces(gone, started).await.0 as usize
     }
 }
 

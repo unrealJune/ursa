@@ -7,6 +7,7 @@
 //!   and offers link codes to new devices.
 
 pub mod capacity;
+pub mod gc;
 pub mod library;
 pub mod locator;
 mod objects;

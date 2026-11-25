@@ -45,7 +45,19 @@ pub enum Request {
     Put { id: ObjectId, len: u64 },
     Get { id: ObjectId },
     Has { ids: Vec<ObjectId> },
-    Delete { ids: Vec<ObjectId> },
+    /// Deletes objects. With `older_than_ms`, only those last stored before then: an object
+    /// someone has put (or put again) since is kept, so a sweep cannot race a writer.
+    Delete {
+        ids: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        older_than_ms: Option<i64>,
+    },
+    /// The account's objects in id order, starting after `after`, at most `limit`.
+    List {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<ObjectId>,
+        limit: u32,
+    },
     HeadGet,
     /// Stores `head` if the node's current head for the account has `expected_seq` (or there is
     /// none and `expected_seq` is `None`), and `head.seq` is greater.
@@ -70,7 +82,27 @@ pub struct Response {
     pub info: Option<NodeInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<Box<Head>>,
+    /// For `list`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<StoredObject>,
+    /// For `delete`: how many were deleted, and their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freed: Option<u64>,
 }
+
+/// An object as a node lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredObject {
+    pub id: ObjectId,
+    pub len: u64,
+    /// When it was last put, ms since the Unix epoch.
+    pub stored_ms: i64,
+}
+
+/// Most objects a `list` answers with at once (keeps the header well under [`MAX_HEADER`]).
+pub const LIST_PAGE: u32 = 4000;
 
 impl Response {
     pub fn ok() -> Self {
@@ -289,8 +321,27 @@ impl NodeClient {
         Ok(r.have)
     }
 
-    pub async fn delete(&self, ids: Vec<ObjectId>) -> Result<()> {
-        self.call(&Request::Delete { ids }, None).await.map(|_| ())
+    /// Deletes objects; with `older_than_ms`, only those not put since. Returns how many went
+    /// and their bytes (as the node reports them; an older node reports neither).
+    pub async fn delete(&self, ids: Vec<ObjectId>, older_than_ms: Option<i64>) -> Result<(u64, u64)> {
+        let n = ids.len() as u64;
+        let (r, _) = self.call(&Request::Delete { ids, older_than_ms }, None).await?;
+        Ok((r.deleted.unwrap_or(n), r.freed.unwrap_or(0)))
+    }
+
+    /// Every object this account has on the node.
+    pub async fn list(&self) -> Result<Vec<StoredObject>> {
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let (r, _) = self.call(&Request::List { after, limit: LIST_PAGE }, None).await?;
+            let done = (r.objects.len() as u32) < LIST_PAGE;
+            after = r.objects.last().map(|o| o.id);
+            out.extend(r.objects);
+            if done || after.is_none() {
+                return Ok(out);
+            }
+        }
     }
 
     pub async fn head_get(&self) -> Result<Option<Head>> {

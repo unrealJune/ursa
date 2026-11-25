@@ -13,9 +13,14 @@ Plus: at 4-of-6, two nodes are stopped and every file still reads; a switch that
 nodes than are up is refused and leaves the library readable; the storage report carries
 uptime, limits and a recommendation; and `give` regrants friends' space.
 
+Nothing left behind: a switch killed twice part-way is finished by the next run, which also
+deletes what the killed runs wrote; an upload killed part-way leaves pieces that a sweep keeps
+while young and deletes after (grace 0 here); a deleted file's pieces are swept too. After each,
+the pool holds n/k of the files' bytes and every file still reads.
+
   python -I scripts/protection-test.py --bin target/debug --work <dir>
 """
-import argparse, hashlib, json, os, re, shutil, subprocess, time
+import argparse, atexit, hashlib, json, os, re, shutil, subprocess, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--bin", required=True, help="directory with ursa and ursa-node")
@@ -47,6 +52,14 @@ def ursa(profile, *a, check=True, timeout=600):
 
 
 procs = {}
+
+
+@atexit.register
+def stop_all():
+    """Stops this run's nodes however the run ends, so a failure does not leave them running."""
+    for p in procs.values():
+        if p.poll() is None:
+            p.kill()
 
 
 def start_node(name, wait_claim=True):
@@ -136,6 +149,25 @@ def pool_bytes():
     return st, st["home_bytes"] + st["friends_bytes"]
 
 
+def unique_bytes():
+    """Bytes of distinct file content: identical files share chunks, stored once."""
+    seen, total = set(), 0
+    for p, digest in files.items():
+        if digest not in seen:
+            seen.add(digest)
+            total += os.path.getsize(p)
+    return total
+
+
+def check_pool(k, n, label, slack=1.10, extra=3_000_000):
+    """The pool holds about unique bytes x n/k of alice's: nothing left behind."""
+    st, raw = pool_bytes()
+    want = unique_bytes() * n / k
+    assert want * 0.97 <= raw <= want * slack + extra, f"{label}: pool holds {raw}, expected about {want:.0f}"
+    log(f"{label}: pool holds {raw / 1e6:.1f} MB for {unique_bytes() / 1e6:.1f} MB of files ({raw / unique_bytes():.2f}x)")
+    return st
+
+
 def switch(k, n):
     ursa("alice", "protection", "--k", str(k), "--n", str(n))
     st = storage()
@@ -148,13 +180,7 @@ def switch(k, n):
     st, raw = pool_bytes()
     assert st["pending_files"] == 0, st
     assert list(st["codes"]) == [f"{k}-of-{n}"], st["codes"]
-    # Shared chunks are stored once, so expect the unique bytes times n/k. (After the cut-short
-    # switch, pieces written but never committed linger until leases exist: allow for them.)
-    unique = stored - os.path.getsize(os.path.join(src, "file-3.bin"))
-    want = unique * n / k
-    slack = 1.6 if (k, n) == (3, 5) else 1.10
-    assert want * 0.97 <= raw <= want * slack + 3_000_000, f"{k}-of-{n}: pool holds {raw}, expected about {want:.0f}"
-    log(f"{k}-of-{n}: pool holds {raw / 1e6:.1f} MB for {unique / 1e6:.1f} MB of files ({raw / unique:.2f}x)")
+    check_pool(k, n, f"{k}-of-{n}")
     again = json.loads(ursa("alice", "recode"))
     assert again["recoded_files"] == 0 and again["shards_deleted"] == 0, again
     check_all(f"{k}-of-{n}")
@@ -182,21 +208,62 @@ log("erin and frank back")
 switch(1, 3)
 switch(2, 4)
 
-# A switch cut short (the app closed mid-way) finishes when it runs again.
+def killed(*a, after):
+    """Runs `ursa alice ...` and kills it after `after` seconds (the app closing mid-way)."""
+    p = subprocess.Popen([URSA, "--profile", os.path.join(work, "profiles", "alice"), "--device-name", "alice", *a],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=dict(os.environ, RUST_LOG="warn"))
+    time.sleep(after)
+    p.kill(); p.wait()
+
+
+# A switch cut short, twice, at different points: the next run finishes it, and clears what the
+# stopped runs wrote (this device's journal), with no sweep needed.
 ursa("alice", "protection", "--k", "4", "--n", "6")
-cut = subprocess.Popen([URSA, "--profile", os.path.join(work, "profiles", "alice"), "--device-name", "alice", "recode"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(2.5)
-cut.kill(); cut.wait()
+for after in (2.5, 2.0):
+    killed("recode", after=after)
+    st = storage()
+    log(f"switch to 4-of-6 killed after {after}s: {st['pending_files']} files to move, {st['leftover_pieces']} uncommitted pieces in the journal")
 st = storage()
-log(f"switch to 4-of-6 cut short: {st['pending_files']} of {len(files)} files still to move, codes {st['codes']}")
+assert st["leftover_pieces"] > 0 or st["pending_files"] == 0, "the stopped runs wrote nothing: kill later"
 r = json.loads(ursa("alice", "recode"))
 st = storage()
 assert st["pending_files"] == 0 and list(st["codes"]) == ["4-of-6"], st
-log(f"resumed: re-coded {r['recoded_files']} more files; every chunk now 4-of-6")
+assert st["leftover_pieces"] == 0, st["leftover_pieces"]
+log(f"resumed: re-coded {r['recoded_files']} files, deleted {r['shards_deleted']} pieces (old code and the stopped runs' leftovers)")
+check_pool(4, 6, "after the resumed switch")
 check_all("resumed 4-of-6")
 
 switch(3, 5)
+
+# An upload killed part-way leaves pieces nothing references. A sweep keeps them while they are
+# young (another device could still be about to commit them) and deletes them after.
+big = os.path.join(work, "big.bin")
+with open(big, "wb") as f:
+    f.write(os.urandom(300_000_000))
+_, before = pool_bytes()
+killed("upload", big, after=4.0)
+_, during = pool_bytes()
+assert during > before, "the killed upload wrote nothing: kill later"
+assert "big.bin" not in ursa("alice", "ls"), "the upload finished before it was killed: use a bigger file"
+g = json.loads(ursa("alice", "gc"))
+assert g["deleted"] == 0 and g["kept_young"] > 0, g
+log(f"killed upload left {(during - before) / 1e6:.1f} MB; gc with 72 h grace kept {g['kept_young']} young pieces")
+g = json.loads(ursa("alice", "gc", "--grace-hours", "0"))
+assert g["deleted"] > 0 and not g["nodes_skipped"], g
+log(f"gc with no grace: deleted {g['deleted']} pieces, {g['bytes_freed'] / 1e6:.1f} MB")
+check_pool(3, 5, "after the sweep", slack=1.03, extra=1_000_000)
+check_all("after the sweep")
+
+# A deleted file's pieces go too.
+gone = os.path.join(src, "file-4.bin")
+ursa("alice", "rm", uploaded[os.path.basename(gone)])
+del files[gone]
+g = json.loads(ursa("alice", "gc", "--grace-hours", "0"))
+log(f"deleted file-4: gc deleted {g['deleted']} pieces, {g['bytes_freed'] / 1e6:.1f} MB")
+check_pool(3, 5, "after deleting a file", slack=1.03, extra=1_000_000)
+check_all("after deleting a file")
+st = storage()
+assert st["files"] == len(files) and st["leftover_pieces"] == 0, st
 
 # Giving: 7.5 GB split over five friends (each had 2 GB).
 ursa("alice", "give", "7.5")

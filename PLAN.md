@@ -624,7 +624,24 @@ code, commits the index every 16 files, and after each commit deletes the old pi
 references (counted across all manifests, so chunks shared by identical files survive). It runs
 in the app, not the page, and picks up again at the next start if the app closed mid-way. A
 switch the pool cannot take now (fewer reachable nodes than `n`) is refused and changes nothing.
-Pieces written by a switch cut short are not referenced and stay until leases exist.
+
+**Nothing left behind, nothing lost** (`ursa_client::gc`). Unreferenced pieces come from switches
+and uploads stopped part-way, deleted files, and rewritten manifests and indexes. Three layers:
+
+- *Fixed placement*: a switch puts an object's pieces where its id says, so a re-run re-uses
+  the pieces the stopped run wrote.
+- *A journal* on the device of pieces written and not committed. The next switch deletes the
+  ones nothing references; the app re-runs a switch at start while the journal is not empty.
+- *A sweep* (`ursa gc`, and the app at start): lists every node (`list`, new in the protocol)
+  and deletes this account's pieces that no live file, manifest or index references and that
+  are older than a grace period (72 h, longer than any upload or switch elsewhere takes to
+  commit). It refuses if any file cannot be read, and re-reads the library after listing.
+
+Every delete is conditional on the node: `delete` takes `older_than_ms` and keeps any piece put
+since. Putting a piece that already exists refreshes its time. So a sweep or a switch that read
+the library before another device committed cannot delete a piece that device just wrote or
+re-used. Nodes too old to list are skipped; nodes too old to understand the condition delete
+unconditionally, as before.
 
 **Uptime.** Nodes record the spans they were running (`node/uptime.json`, a heartbeat a minute)
 and report the share of the last 30 days in `info`, with the disk's size and free space for

@@ -90,6 +90,11 @@ enum Command {
     },
     Recode,
     SetGive { bytes: u64 },
+    /// Deletes unreferenced pieces older than `grace_hours` (default 72).
+    Gc {
+        #[serde(default)]
+        grace_hours: Option<f64>,
+    },
 }
 
 fn default_quota_gb() -> u64 {
@@ -361,6 +366,10 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
             let o = out.clone();
             let r = s.recode(move |d, t| o.progress(d, t)).await?;
             Ok(json!({ "report": r }))
+        }
+        Command::Gc { grace_hours } => {
+            let grace = grace_hours.map_or(ursa_client::gc::DEFAULT_GRACE, |h| std::time::Duration::from_secs_f64(h.max(0.0) * 3600.0));
+            Ok(json!({ "report": host.session().await?.collect_garbage(grace).await? }))
         }
         Command::SetGive { bytes } => {
             host.session().await?.set_give(bytes).await?;
