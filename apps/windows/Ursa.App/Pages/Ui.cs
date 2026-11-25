@@ -61,8 +61,37 @@ internal static class Ui
         FontFamily = new FontFamily("Segoe UI Variable Display"),
     };
 
-    /// <summary>A horizontal bar of segments, each a share of <paramref name="total"/>.</summary>
-    public static Grid Bar(IEnumerable<(double Value, Brush Fill)> segments, double total, double height = 12, double? tickAt = null)
+    /// <summary>
+    /// A horizontal bar of segments, each a share of <paramref name="total"/>; optionally a
+    /// mark at <paramref name="tickAt"/> and a hatched-looking band over a range.
+    /// </summary>
+    public static Grid Bar(IEnumerable<(double Value, Brush Fill)> segments, double total, double height = 12, double? tickAt = null,
+        (double From, double To)? band = null)
+    {
+        var bar = PlainBar(segments, total, height, tickAt);
+        if (band is not { } b || total <= 0) return bar;
+        double from = Math.Clamp(b.From, 0, total), to = Math.Clamp(b.To, from, total);
+        var overlay = new Grid { Margin = new Thickness(0, -3, 0, -3) };
+        overlay.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(from, 0.0001), GridUnitType.Star) });
+        overlay.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(to - from, 0.0001), GridUnitType.Star) });
+        overlay.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(total - to, 0.0001), GridUnitType.Star) });
+        var r = new Rectangle
+        {
+            Fill = Res("SystemFillColorCautionBrush"),
+            Opacity = 0.75,
+            RadiusX = 2,
+            RadiusY = 2,
+            MinWidth = 3, // never narrower than a visible sliver
+        };
+        Grid.SetColumn(r, 1);
+        overlay.Children.Add(r);
+        var host = new Grid { Height = height };
+        host.Children.Add(bar);
+        host.Children.Add(overlay);
+        return host;
+    }
+
+    private static Grid PlainBar(IEnumerable<(double Value, Brush Fill)> segments, double total, double height, double? tickAt)
     {
         var g = new Grid { Height = height, CornerRadius = new CornerRadius(3), Background = Track };
         var inner = new Grid();

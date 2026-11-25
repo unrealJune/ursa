@@ -244,6 +244,19 @@ public sealed partial class PoolPage : Page
         head.Children.Add(split);
         p.Children.Add(head);
 
+        // A switch holds one batch of files twice (old pieces and new) until it commits it.
+        bool moving = !sel.Is(r.K, r.N) || r.PendingFiles > 0;
+        long peakFiles = sel.N > 0 ? sel.SwitchExtraBytes * sel.K / sel.N : 0;
+        if (moving && sel.Available)
+        {
+            var extra = Ui.Row("While switching", $"+{StorageReport.Size(sel.SwitchExtraBytes)}", strong: true);
+            if (!sel.SwitchFits) ((TextBlock)extra.Children[1]).Foreground = Ui.Res("SystemFillColorCriticalBrush");
+            extra.MaxWidth = 420;
+            extra.HorizontalAlignment = HorizontalAlignment.Left;
+            extra.MinWidth = 260;
+            p.Children.Add(extra);
+        }
+
         var options = r.Choices.Where(c => c.Available).ToList();
         double max = Math.Max(options.Select(c => (double)c.LimitBytes).DefaultIfEmpty(0).Max(), r.StoredBytes) * 1.08;
         if (max <= 0) max = 1;
@@ -258,7 +271,10 @@ public sealed partial class PoolPage : Page
             bars.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             var label = Ui.Text(c.Name, hint: !isSel, strong: isSel);
             label.FontSize = 13;
-            var bar = Ui.Bar([(c.LimitBytes, isSel ? Ui.Series(0) : Ui.Series(2))], max, 14, tickAt: r.StoredBytes);
+            // The selected option's bar also shows the room a switch to it takes, past what is
+            // stored now.
+            (double, double)? band = isSel && moving && peakFiles > 0 ? (r.StoredBytes, r.StoredBytes + peakFiles) : null;
+            var bar = Ui.Bar([(c.LimitBytes, isSel ? Ui.Series(0) : Ui.Series(2))], max, 14, tickAt: r.StoredBytes, band: band);
             var value = Ui.Text(StorageReport.Size(c.LimitBytes));
             value.FontSize = 13;
             value.HorizontalAlignment = HorizontalAlignment.Right;
@@ -331,8 +347,10 @@ public sealed partial class PoolPage : Page
         var sel = report.Choices.FirstOrDefault(c => c.Is(selected.K, selected.N)) ?? report.Current;
         bool isCurrent = sel.Is(report.K, report.N);
         bool needed = !isCurrent || report.PendingFiles > 0;
-        SwitchButton.Content = switching ? "Switching" : needed ? $"Switch to {sel.Name}{(sel.Shape == "" ? "" : $" ({sel.Shape})")}" : "In use";
-        SwitchButton.IsEnabled = !switching && needed && sel.Available && report.StoredBytes <= sel.LimitBytes;
+        bool fits = sel.SwitchFits;
+        SwitchButton.Content = switching ? "Switching" : !needed ? "In use" : !fits ? "Not enough space"
+            : $"Switch to {sel.Name}{(sel.Shape == "" ? "" : $" ({sel.Shape})")}";
+        SwitchButton.IsEnabled = !switching && needed && sel.Available && fits;
     }
 
     private async void OnSwitch(object sender, RoutedEventArgs e)

@@ -625,6 +625,14 @@ references (counted across all manifests, so chunks shared by identical files su
 in the app, not the page, and picks up again at the next start if the app closed mid-way. A
 switch the pool cannot take now (fewer reachable nodes than `n`) is refused and changes nothing.
 
+**Room to switch.** A batch's new pieces sit beside its old ones until the batch commits, so a
+switch needs one batch of extra space, not a second copy of the library. Batches stop at 16
+files or 1 GB (a bigger file is a batch of its own). The storage report gives each choice's
+extra space (the largest batch of the files that would move, times n/k) and whether it fits:
+the library plus that batch must fit both the current choice and the new one. The Pool page
+shows it as "While switching +X", a band on the chosen option's bar from what is stored to
+what the switch needs, and the Switch button reads "Not enough space" when it does not fit.
+
 **Nothing left behind, nothing lost** (`ursa_client::gc`). Unreferenced pieces come from switches
 and uploads stopped part-way, deleted files, and rewritten manifests and indexes. Three layers:
 

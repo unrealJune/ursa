@@ -17,8 +17,34 @@ use crate::gc::{Piece, pieces, placement};
 use crate::objects::{auto_code, codes_for};
 use crate::{Session, now_ms, short};
 
-/// Files re-coded between index commits. A commit is what lets the old pieces go.
-const RECODE_BATCH: usize = 16;
+/// A switch commits the index after at most this many files, or this many bytes of them. A
+/// commit is what lets a batch's old pieces go, so one batch is all the extra room a switch
+/// needs: its new pieces sit beside its old ones until then.
+const RECODE_BATCH_FILES: usize = 16;
+const RECODE_BATCH_BYTES: u64 = 1_000_000_000;
+
+/// Splits files (their sizes, in the order a switch takes them) into batches. A file bigger
+/// than a batch is a batch of its own.
+pub(crate) fn batches(sizes: &[u64]) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let (mut start, mut bytes) = (0, 0u64);
+    for (i, &s) in sizes.iter().enumerate() {
+        if i > start && (i - start == RECODE_BATCH_FILES || bytes + s > RECODE_BATCH_BYTES) {
+            out.push(start..i);
+            (start, bytes) = (i, 0);
+        }
+        bytes += s;
+    }
+    if start < sizes.len() {
+        out.push(start..sizes.len());
+    }
+    out
+}
+
+/// The most file bytes in any one batch: what a switch holds twice at its peak.
+pub(crate) fn peak_batch(sizes: &[u64]) -> u64 {
+    batches(sizes).into_iter().map(|r| sizes[r].iter().sum()).max().unwrap_or(0)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shape {
@@ -283,6 +309,21 @@ impl Session {
         }
         let stored_bytes = kinds.photos + kinds.videos + kinds.files;
 
+        // What switching to each choice needs while it runs: one batch of the files that would
+        // move, in the new code, beside its old pieces. It fits if the library plus that batch
+        // fits both where it is now and where it is going.
+        for c in &mut choices {
+            let code = Code { k: c.k, n: c.n };
+            let moving: Vec<u64> = files
+                .iter()
+                .filter(|(_, _, m)| m.chunks.iter().any(|ch| ch.shards.as_ref().is_some_and(|s| s.code != code)))
+                .map(|(_, _, m)| m.size)
+                .collect();
+            let peak = peak_batch(&moving);
+            c.switch_extra_bytes = peak * c.n as u64 / c.k as u64;
+            c.switch_fits = c.available && stored_bytes + peak <= c.limit_bytes.min(limit_bytes);
+        }
+
         Ok(StorageReport {
             protection: protection.into(),
             chosen: state.protection.is_some(),
@@ -351,7 +392,9 @@ impl Session {
 
         let mut recoded: HashMap<ObjectId, ShardSet> = HashMap::new();
         let mut kept: HashSet<(String, ObjectId)> = HashSet::new();
-        for batch in todo.chunks(RECODE_BATCH) {
+        let sizes: Vec<u64> = todo.iter().map(|(_, _, m)| m.size).collect();
+        for range in batches(&sizes) {
+            let batch = &todo[range];
             let mut moved: Vec<(ObjectId, ObjectId, ShardSet, i64)> = Vec::new();
             let mut released: Vec<(String, ObjectId)> = Vec::new();
             let mut written: HashSet<Piece> = HashSet::new();
@@ -508,6 +551,20 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batches_are_capped_by_count_and_by_bytes() {
+        const MB: u64 = 1_000_000;
+        // Many small photos: 16 a batch.
+        let photos = vec![3 * MB; 40];
+        assert_eq!(batches(&photos), vec![0..16, 16..32, 32..40]);
+        assert_eq!(peak_batch(&photos), 48 * MB);
+        // Videos: a batch stops before it would pass 1 GB; a bigger file goes alone.
+        let videos = [400 * MB, 400 * MB, 400 * MB, 4000 * MB, 10 * MB];
+        assert_eq!(batches(&videos), vec![0..2, 2..3, 3..4, 4..5]);
+        assert_eq!(peak_batch(&videos), 4000 * MB);
+        assert_eq!(peak_batch(&[]), 0);
+    }
 
     #[test]
     fn calendar_round_trips() {

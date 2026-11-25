@@ -272,6 +272,21 @@ assert st["give_bytes"] == 7_500_000_000, st["give_bytes"]
 assert sorted(h["quota_bytes"] for h in st["hosting"]) == [1_500_000_000] * 5, st["hosting"]
 log("give 7.5 GB: each friend now has 1.5 GB on alice's node")
 
+# Switching needs room for one batch twice. With little given, a heavier code can hold the
+# library but not the switch to it; the report says so.
+ursa("alice", "give", "0.05")
+st = storage()
+by = {(c["k"], c["n"]): c for c in st["choices"]}
+for (k, n), c in by.items():
+    if not c["available"] or (k, n) == (3, 5):
+        continue
+    assert c["switch_extra_bytes"] > 0, c
+    assert c["switch_fits"] == (st["stored_bytes"] + c["switch_extra_bytes"] * k // n <= min(c["limit_bytes"], st["limit_bytes"])), c
+assert by[(3, 5)]["switch_extra_bytes"] == 0, "the current code needs no switch"
+assert by[(1, 2)]["switch_fits"] and not by[(1, 3)]["switch_fits"], (by[(1, 2)], by[(1, 3)])
+log(f"50 MB given: 3 copies holds {by[(1, 3)]['limit_bytes'] / 1e6:.0f} MB but switching to it needs "
+    f"+{by[(1, 3)]['switch_extra_bytes'] / 1e6:.0f} MB on top of {st['stored_bytes'] / 1e6:.0f} MB: refused; 2 copies fits")
+
 for p in procs.values():
     if p.poll() is None:
         p.kill()

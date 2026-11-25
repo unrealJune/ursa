@@ -3,7 +3,8 @@ using System.Text.Json;
 namespace Ursa.App.Services;
 
 /// <summary>One protection choice: any <c>K</c> of <c>N</c> pieces rebuild a file.</summary>
-public sealed record Choice(int K, int N, int Survives, long LimitBytes, double? OfflineHours, bool Available, bool Recommended)
+public sealed record Choice(int K, int N, int Survives, long LimitBytes, double? OfflineHours, bool Available, bool Recommended,
+    long SwitchExtraBytes, bool SwitchFits)
 {
     public string Name => K == 1 ? $"{N} copies" : $"{(double)N / K:0.##}×";
     public string Shape => K == 1 ? "" : $"{K} of {N}";
@@ -18,7 +19,9 @@ public sealed record Choice(int K, int N, int Survives, long LimitBytes, double?
         c.GetProperty("k").GetInt32(), c.GetProperty("n").GetInt32(), c.GetProperty("survives").GetInt32(),
         c.GetProperty("limit_bytes").GetInt64(),
         c.TryGetProperty("offline_hours", out var h) && h.ValueKind == JsonValueKind.Number ? h.GetDouble() : null,
-        c.GetProperty("available").GetBoolean(), c.GetProperty("recommended").GetBoolean());
+        c.GetProperty("available").GetBoolean(), c.GetProperty("recommended").GetBoolean(),
+        c.TryGetProperty("switch_extra_bytes", out var x) ? x.GetInt64() : 0,
+        c.TryGetProperty("switch_fits", out var f) && f.GetBoolean());
 }
 
 public sealed record Member(string Name, bool Own, bool Reachable, double? Up30d, long UsedBytes, long? GivesYou)

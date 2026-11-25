@@ -77,6 +77,13 @@ pub struct Choice {
     /// The pool has enough domains for it.
     pub available: bool,
     pub recommended: bool,
+    /// Extra pool space switching to this choice takes while it runs (one batch of files in
+    /// the new code, beside its old pieces), and whether the pool has that room. Filled in by
+    /// the storage report, which knows the library.
+    #[serde(default)]
+    pub switch_extra_bytes: u64,
+    #[serde(default)]
+    pub switch_fits: bool,
 }
 
 /// Every preset plus `current` (if it is not one), with limits and availability, and the
@@ -97,6 +104,8 @@ pub fn choices(current: Code, own_cap: Option<u64>, friend_caps: &[u64], give: u
             offline_hours: offline_hours(c, ups),
             available: c.n as usize <= domains,
             recommended: false,
+            switch_extra_bytes: 0,
+            switch_fits: false,
         })
         .collect();
     let best = out
