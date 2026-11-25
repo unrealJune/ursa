@@ -9,6 +9,7 @@
 pub mod library;
 pub mod locator;
 mod objects;
+mod stats;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -365,6 +366,12 @@ impl Session {
             Some(p) if p.is_relay() => "relay".into(),
             _ => "connecting".into(),
         }
+    }
+
+    /// How this device reaches each node it has a connection to now (`relay`, `direct`), keyed by
+    /// the short id the operation summaries use.
+    pub(crate) async fn paths_now(&self) -> HashMap<String, String> {
+        self.conns.lock().await.iter().map(|(id, c)| (short(id), Self::path_of(c))).collect()
     }
 
     /// Every path a connection has, the selected one starred, with its address and round trip:

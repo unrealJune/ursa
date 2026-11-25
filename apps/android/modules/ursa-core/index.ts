@@ -37,6 +37,8 @@ export type LibraryItem = {
   width: number | null;
   height: number | null;
   hasThumb: boolean;
+  /** After an upload: how long the phone took to copy the file out and draw its thumbnail. */
+  prepareMs?: number;
 };
 
 export type PoolNode = {

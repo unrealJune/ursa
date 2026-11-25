@@ -16,6 +16,7 @@ use ursa_core::head::{IndexEntry, LibraryIndex};
 use ursa_core::manifest::{self, ChunkRef, FileManifest, ShardSet, StoredRef};
 
 use crate::objects::code_for;
+use crate::stats::{Stage, Stats, mb, rate};
 use crate::{Session, now_ms};
 
 /// Chunks in flight per upload or download.
@@ -143,20 +144,63 @@ impl Session {
     /// Every staged upload is written with it: a change is one index upload and one head save
     /// whatever it carries, so this is where uploads are batched.
     async fn change_index(&self, change: impl Fn(&mut LibraryIndex)) -> Result<()> {
-        let _queued = self.index_lock.lock().await;
+        let started = std::time::Instant::now();
+        let staged = self.pending_count();
+        let (stats, r) = Stats::default().scope(self.change_index_inner(change)).await;
+        let paths = self.paths_now().await;
+        let path = |id: &str| paths.get(id).cloned().unwrap_or_else(|| "-".into());
+        match &r {
+            Ok(index_bytes) => info!(
+                staged,
+                index = %mb(*index_bytes as u64),
+                ms = started.elapsed().as_millis() as u64,
+                stages = %stats.stages(),
+                nodes = %stats.nodes(path),
+                "library change written"
+            ),
+            Err(e) => warn!(
+                staged,
+                ms = started.elapsed().as_millis() as u64,
+                stages = %stats.stages(),
+                nodes = %stats.nodes(path),
+                "library change failed: {e:#}"
+            ),
+        }
+        r.map(|_| ())
+    }
+
+    /// Returns the sealed index's size.
+    async fn change_index_inner(&self, change: impl Fn(&mut LibraryIndex)) -> Result<usize> {
+        let _queued = {
+            let _t = Stage::start("queue");
+            self.index_lock.lock().await
+        };
         // Staged from here on are left for the next change; these are written by this one.
         let staged = self.pending_uploads();
         for _ in 0..5 {
             let before = self.state().await.index.as_ref().map(|r| r.id);
-            let mut idx = self.stored_index().await?;
+            let mut idx = {
+                let _t = Stage::start("read");
+                self.stored_index().await?
+            };
             for s in &staged {
                 s.apply(&mut idx);
             }
             change(&mut idx);
-            let (id, sealed) = idx.seal(&self.account);
-            let writable = self.writable().await;
-            let set = self.store_object(&sealed, code_for(writable.len(), false)?, &writable, rand_usize()).await?;
+            let (id, sealed) = {
+                let _t = Stage::start("seal");
+                idx.seal(&self.account)
+            };
+            let writable = {
+                let _t = Stage::start("pool");
+                self.writable().await
+            };
+            let set = {
+                let _t = Stage::start("store");
+                self.store_object(&sealed, code_for(writable.len(), false)?, &writable, rand_usize()).await?
+            };
             let new = StoredRef { id, shards: set };
+            let _head = Stage::start("head");
             let state = self
                 .update(move |s| {
                     // Only replace the index we started from; otherwise update() loaded a newer
@@ -171,7 +215,7 @@ impl Session {
                     let written: std::collections::HashSet<ObjectId> = staged.iter().map(|s| s.id).collect();
                     self.pending.lock().expect("pending uploads").retain(|s| !written.contains(&s.id));
                 }
-                return Ok(());
+                return Ok(sealed.len());
             }
         }
         bail!("the library kept changing; try again")
@@ -241,7 +285,37 @@ impl Session {
     /// library (its objects orphaned) if the process ends before a commit, so the caller only
     /// counts a file as kept once a commit after it has succeeded.
     pub async fn upload_staged(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
-        let writable = self.writable().await;
+        let started = std::time::Instant::now();
+        let bytes = tokio::fs::metadata(&meta.path).await.map(|m| m.len()).unwrap_or(0);
+        let (stats, r) = Stats::default().scope(self.upload_staged_inner(meta, progress)).await;
+        let took = started.elapsed();
+        let paths = self.paths_now().await;
+        let path = |id: &str| paths.get(id).cloned().unwrap_or_else(|| "-".into());
+        match &r {
+            Ok(_) => info!(
+                size = %mb(bytes),
+                ms = took.as_millis() as u64,
+                rate = %rate(bytes, took),
+                stages = %stats.stages(),
+                nodes = %stats.nodes(path),
+                "upload done"
+            ),
+            Err(e) => warn!(
+                size = %mb(bytes),
+                ms = took.as_millis() as u64,
+                stages = %stats.stages(),
+                nodes = %stats.nodes(path),
+                "upload failed: {e:#}"
+            ),
+        }
+        r
+    }
+
+    async fn upload_staged_inner(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
+        let writable = {
+            let _t = Stage::start("pool");
+            self.writable().await
+        };
         let big = code_for(writable.len(), true)?;
         let small = code_for(writable.len(), false)?;
         let fmeta = tokio::fs::metadata(&meta.path).await.with_context(|| format!("read {}", meta.path.display()))?;
@@ -259,19 +333,27 @@ impl Session {
         let (tx, mut rx) = tokio::sync::mpsc::channel(IN_FLIGHT);
         let account = self.account.clone();
         let path = meta.path.clone();
-        let reader = tokio::task::spawn_blocking(move || -> Result<()> {
+        // Returns the time spent reading and sealing (not waiting for the network to take more).
+        let reader = tokio::task::spawn_blocking(move || -> Result<std::time::Duration> {
             let f = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(&path)?);
-            for piece in chunk::chunks(f) {
-                if tx.blocking_send(seal_chunk(account.root(), &piece?)).is_err() {
+            let mut sealing = std::time::Duration::ZERO;
+            let mut pieces = chunk::chunks(f);
+            loop {
+                let t = std::time::Instant::now();
+                let Some(piece) = pieces.next() else { break };
+                let sealed = seal_chunk(account.root(), &piece?);
+                sealing += t.elapsed();
+                if tx.blocking_send(sealed).is_err() {
                     break;
                 }
             }
-            Ok(())
+            Ok(sealing)
         });
         let rotate = rand_usize();
         let mut done = 0u64;
         progress(0, total);
         let mut chunks = Vec::new();
+        let placing = Stage::start("place");
         let mut uploads = stream::poll_fn(move |cx| rx.poll_recv(cx))
             .enumerate()
             .map(|(i, s)| {
@@ -289,8 +371,10 @@ impl Session {
             chunks.push(c);
         }
         drop(uploads);
-        reader.await??;
+        drop(placing);
+        Stats::stage("read+seal", reader.await??);
 
+        let thumb_stage = Stage::start("thumb");
         let thumb = match &meta.thumb_path {
             Some(p) => {
                 let bytes = tokio::fs::read(p).await.with_context(|| format!("read thumbnail {}", p.display()))?;
@@ -301,6 +385,8 @@ impl Session {
             }
             None => None,
         };
+        drop(thumb_stage);
+        let _manifest = Stage::start("manifest");
         let m = FileManifest {
             v: manifest::VERSION,
             name,
@@ -341,7 +427,39 @@ impl Session {
     }
 
     pub async fn download(&self, file_id: &str, out_path: &Path, progress: impl Fn(u64, u64)) -> Result<()> {
-        let (_, _, m) = self.entry(file_id).await?;
+        let started = std::time::Instant::now();
+        let (stats, r) = Stats::default().scope(self.download_inner(file_id, out_path, progress)).await;
+        let took = started.elapsed();
+        let paths = self.paths_now().await;
+        let path = |id: &str| paths.get(id).cloned().unwrap_or_else(|| "-".into());
+        match &r {
+            Ok(bytes) => info!(
+                size = %mb(*bytes),
+                ms = took.as_millis() as u64,
+                rate = %rate(*bytes, took),
+                stages = %stats.stages(),
+                hedges = stats.hedges(),
+                decoded = stats.decodes(),
+                nodes = %stats.nodes(path),
+                "download done"
+            ),
+            Err(e) => warn!(
+                ms = took.as_millis() as u64,
+                stages = %stats.stages(),
+                hedges = stats.hedges(),
+                nodes = %stats.nodes(path),
+                "download failed: {e:#}"
+            ),
+        }
+        r.map(|_| ())
+    }
+
+    /// Returns the file's size.
+    async fn download_inner(&self, file_id: &str, out_path: &Path, progress: impl Fn(u64, u64)) -> Result<u64> {
+        let (_, _, m) = {
+            let _t = Stage::start("manifest");
+            self.entry(file_id).await?
+        };
         let tmp = out_path.with_file_name(format!(
             "{}.ursa-part",
             out_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
@@ -350,6 +468,7 @@ impl Session {
         let total = m.size;
         let mut done = 0u64;
         progress(0, total);
+        let fetching = Stage::start("fetch");
         let result: Result<()> = async {
             let mut pieces = stream::iter(m.chunks.clone())
                 .map(|c| async move {
@@ -368,6 +487,7 @@ impl Session {
             Ok(())
         }
         .await;
+        drop(fetching);
         drop(file);
         if let Err(e) = result {
             let _ = tokio::fs::remove_file(&tmp).await;
@@ -379,7 +499,7 @@ impl Session {
         }
         let _ = tokio::fs::remove_file(out_path).await;
         tokio::fs::rename(&tmp, out_path).await?;
-        Ok(())
+        Ok(total)
     }
 
     /// Removes a file from the library. Its shards stay until compaction exists.

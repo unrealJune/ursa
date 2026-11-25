@@ -50,7 +50,11 @@ class UrsaCoreModule : Module() {
     }
 
   private suspend fun upload(uri: String, meta: Map<String, Any?>, task: String, staged: Boolean): Map<String, Any?> {
+    // Copying out of the gallery and drawing the thumbnail happen here, before the core sees the
+    // file; the time goes back with the result so the app's upload log can show it.
+    val preparing = System.nanoTime()
     val prepared = withContext(Dispatchers.IO) { Media.prepare(context, Uri.parse(uri), meta) }
+    val prepareMs = (System.nanoTime() - preparing) / 1_000_000.0
     try {
       val request =
         UploadRequest(
@@ -64,7 +68,8 @@ class UrsaCoreModule : Module() {
           thumbPath = prepared.thumbPath,
         )
       return call {
-        if (staged) core.uploadStaged(request, progress(task)).toMap() else core.upload(request, progress(task)).toMap()
+        val item = if (staged) core.uploadStaged(request, progress(task)) else core.upload(request, progress(task))
+        item.toMap() + ("prepareMs" to prepareMs)
       }
     } finally {
       withContext(Dispatchers.IO) { prepared.cleanup() }

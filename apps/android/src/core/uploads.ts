@@ -104,13 +104,24 @@ async function drain() {
     for (let job = queue.shift(); job && gen === generation; job = queue.shift()) {
       const name = job.meta.name ?? job.uri.split('/').pop() ?? 'file';
       uploads.set({ current: { name, done: 0, total: 1 } });
+      const started = Date.now();
       try {
         const item = await withProgress(
           (task) => Ursa.uploadStaged(job.uri, job.meta, task),
           (done, total) => gen === generation && uploads.set({ current: { name, done, total } }),
         );
         if (gen !== generation) break;
-        upsert(item);
+        // The core logs where its own part of the time went ("upload done"); this adds the phone's
+        // part before it. No names: the type, the size and the times.
+        log('INFO', 'upload: finished', {
+          mime: item.mime,
+          bytes: item.size,
+          ms: Date.now() - started,
+          prepareMs: Math.round(item.prepareMs ?? 0),
+          backup: !!job.assetId,
+        });
+        const { prepareMs: _prepareMs, ...kept } = item;
+        upsert(kept);
         staged(job.assetId, item.fileId);
         uploads.set((u) => ({ done: u.done + 1 }));
       } catch (e) {
