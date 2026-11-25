@@ -5,7 +5,7 @@ import { errorText, type LibraryItem } from 'ursa-core';
 
 import { openFile, saveFile, shareFile } from '@/core/files';
 import { pickFiles } from '@/core/pick';
-import { useUrsa } from '@/core/store';
+import { loadLibrary, remove, useLibrary } from '@/core/library';
 import { bytes, dayLabel, fileIcon, isMedia } from '@/format';
 import { useTheme } from '@/theme';
 import { Button, Empty, Fab, Icon, IconButton, Notice, Progress, Sheet, TopBar, Txt, withAlpha } from '@/ui/kit';
@@ -14,7 +14,11 @@ import { BackupButton, UploadStrip } from '@/ui/upload-status';
 type Sort = 'added' | 'name' | 'size';
 
 export default function Files() {
-  const { items, libLoading, libError, refreshLibrary, enqueue, remove } = useUrsa();
+  const items = useLibrary((s) => s.items);
+  const libLoading = useLibrary((s) => s.loading && !s.loaded);
+  const pulling = useLibrary((s) => s.pulling);
+  const libError = useLibrary((s) => s.error);
+  const refresh = () => loadLibrary({ fromNodes: true, reason: 'pull' });
   const { c } = useTheme();
   const [all, setAll] = useState(false);
   const [sort, setSort] = useState<Sort>('added');
@@ -53,13 +57,13 @@ export default function Files() {
       <UploadStrip />
       {libError || error ? (
         <View style={{ paddingHorizontal: 16 }}>
-          <Notice tone="error" text={(error ?? libError)!} />
+          <Notice tone="error" text={error ?? `Could not reach your nodes; this is what this phone knows. ${libError}`} />
         </View>
       ) : null}
       <FlashList
         data={files}
         keyExtractor={(i) => i.fileId}
-        refreshControl={<RefreshControl refreshing={libLoading} onRefresh={refreshLibrary} colors={[c.primary]} progressBackgroundColor={c.surfaceContainerHigh} />}
+        refreshControl={<RefreshControl refreshing={pulling} onRefresh={refresh} colors={[c.primary]} progressBackgroundColor={c.surfaceContainerHigh} />}
         contentContainerStyle={{ paddingBottom: 96 }}
         renderItem={({ item }) => (
           <FileRow
@@ -75,12 +79,12 @@ export default function Files() {
               icon="folder-open"
               title="No files yet"
               body="Documents, archives, anything: encrypted on this phone and kept across your pool."
-              action={<Button label="Upload files" icon="upload-file" onPress={() => pickFiles(enqueue)} style={{ marginTop: 8 }} />}
+              action={<Button label="Upload files" icon="upload-file" onPress={pickFiles} style={{ marginTop: 8 }} />}
             />
           )
         }
       />
-      <Fab icon="upload-file" label="Upload" onPress={() => pickFiles(enqueue)} />
+      <Fab icon="upload-file" label="Upload" onPress={pickFiles} />
 
       <Sheet
         visible={menu !== null}
@@ -99,7 +103,7 @@ export default function Files() {
                   onPress: () =>
                     Alert.alert('Delete this file?', `${menu.name} is removed from every device and node.`, [
                       { text: 'Cancel', style: 'cancel' },
-                      { text: 'Delete', style: 'destructive', onPress: () => remove(menu.fileId).catch((e) => setError(errorText(e))) },
+                      { text: 'Delete', style: 'destructive', onPress: () => remove(menu).catch((e) => setError(errorText(e))) },
                     ]),
                 },
               ]

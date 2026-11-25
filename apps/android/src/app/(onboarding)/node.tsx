@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { View } from 'react-native';
 import { errorText, Ursa } from 'ursa-core';
 
-import { useUrsa } from '@/core/store';
+import { refreshStatus } from '@/core/session';
 import { useTheme } from '@/theme';
 import { CodeField } from '@/ui/code-field';
 import { Button, Field, Icon, Notice, Page, Txt } from '@/ui/kit';
@@ -12,7 +12,6 @@ import { Button, Field, Icon, Notice, Page, Txt } from '@/ui/kit';
  * the pool as well as taking it.
  */
 export default function AddNode() {
-  const { refreshStatus } = useUrsa();
   const { c } = useTheme();
   const [link, setLink] = useState('');
   const [label, setLabel] = useState('Home node');

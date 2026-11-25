@@ -4,14 +4,13 @@ import { useState } from 'react';
 import { View } from 'react-native';
 import { errorText, Ursa } from 'ursa-core';
 
-import { useUrsa } from '@/core/store';
+import { adopt } from '@/core/session';
 import { useTheme } from '@/theme';
 import { Button, Field, ListRow, Loading, Notice, Page, Txt } from '@/ui/kit';
 
 /** Recovers an account from its 24 words or a key file. The account is found through its locator record. */
 export default function Recover() {
   const { with: method } = useLocalSearchParams<{ with?: 'words' | 'file' }>();
-  const { adopt } = useUrsa();
   const { c } = useTheme();
   const [words, setWords] = useState('');
   const [file, setFile] = useState<{ uri: string; name: string } | null>(null);

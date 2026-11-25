@@ -9,6 +9,7 @@
 pub mod library;
 pub mod locator;
 mod objects;
+mod stats;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -225,6 +226,14 @@ pub struct Session {
     down: std::sync::Mutex<HashMap<String, Instant>>,
     /// The newest head seen (None before the first save) and its opened state.
     head: Mutex<Option<(Option<Head>, AccountState)>>,
+    /// Held for the whole of a library index change. Changes on one device are queued here
+    /// rather than raced: two at once both built on the same index and head, every save but one
+    /// conflicted, and a phone deleting a few files in parallel exhausted the retries ("the
+    /// account head kept changing"). Other devices' changes are still merged by retrying.
+    index_lock: Mutex<()>,
+    /// Uploads whose objects are stored but whose index entries are not written yet (see
+    /// `upload_staged`): reads see them, and the next index change writes them.
+    pending: std::sync::Mutex<Vec<library::Staged>>,
 }
 
 /// A node in the pool, as seen right now.
@@ -277,6 +286,8 @@ impl Session {
             conns: Mutex::new(HashMap::new()),
             down: std::sync::Mutex::new(HashMap::new()),
             head: Mutex::new(None),
+            index_lock: Mutex::new(()),
+            pending: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -323,11 +334,13 @@ impl Session {
             .and_then(|r| r);
         match dialled {
             Ok(c) => {
+                info!(node = %short(&r.id), paths = %Self::paths_of(&c), "node reached");
                 self.down.lock().unwrap().remove(&r.id);
                 self.conns.lock().await.insert(r.id.clone(), c.clone());
                 Ok(c)
             }
             Err(e) => {
+                info!(node = %short(&r.id), "node not reached: {e:#}");
                 self.down.lock().unwrap().insert(r.id.clone(), Instant::now());
                 Err(e)
             }
@@ -353,6 +366,34 @@ impl Session {
             Some(p) if p.is_relay() => "relay".into(),
             _ => "connecting".into(),
         }
+    }
+
+    /// How this device reaches each node it has a connection to now (`relay`, `direct`), keyed by
+    /// the short id the operation summaries use.
+    pub(crate) async fn paths_now(&self) -> HashMap<String, String> {
+        self.conns.lock().await.iter().map(|(id, c)| (short(id), Self::path_of(c))).collect()
+    }
+
+    /// Every path a connection has, the selected one starred, with its address and round trip:
+    /// `*ip 192.168.1.178:31842 12ms, relay https://iroh-wus.streetcrypt.id/ 140ms`. For the log
+    /// when a node is reached or a request on it fails, since "connected but nothing arrives"
+    /// (as away from home, where requests hung on connections that had opened) is told apart by
+    /// which path the data was going down.
+    pub fn paths_of(c: &NodeClient) -> String {
+        let paths = c.connection().paths();
+        let all: Vec<String> = paths
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}{} {:?} {}ms",
+                    if p.is_selected() { "*" } else { "" },
+                    if p.is_relay() { "relay" } else { "ip" },
+                    p.remote_addr(),
+                    p.rtt().as_millis()
+                )
+            })
+            .collect();
+        if all.is_empty() { "no paths".into() } else { all.join(", ") }
     }
 
     // -----------------------------------------------------------------------------------------

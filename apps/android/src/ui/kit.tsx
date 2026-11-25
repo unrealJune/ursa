@@ -330,12 +330,13 @@ export function Notice({ text, tone = 'info', action }: { text: string; tone?: '
 }
 
 /** A Material 3 top app bar for screens without a stack header (the tabs). */
-export function TopBar({ title, actions }: { title: string; actions?: ReactNode }) {
+export function TopBar({ title, actions, leading, background }: { title: string; actions?: ReactNode; leading?: ReactNode; background?: string }) {
   const { c } = useTheme();
   const insets = useSafeAreaInsets();
   return (
-    <View style={{ paddingTop: insets.top, backgroundColor: c.surface }}>
-      <View style={{ height: 64, flexDirection: 'row', alignItems: 'center', paddingLeft: 16, paddingRight: 4 }}>
+    <View style={{ paddingTop: insets.top, backgroundColor: background ?? c.surface }}>
+      <View style={{ height: 64, flexDirection: 'row', alignItems: 'center', paddingLeft: leading ? 4 : 16, paddingRight: 4, gap: leading ? 8 : 0 }}>
+        {leading}
         <Text style={[typeScale.titleLarge, { color: c.onSurface, flex: 1 }]} numberOfLines={1}>
           {title}
         </Text>

@@ -2,12 +2,11 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import { errorText, Ursa } from 'ursa-core';
 
-import { useUrsa } from '@/core/store';
+import { adopt } from '@/core/session';
 import { useTheme } from '@/theme';
 import { Button, Field, Notice, Page, Txt } from '@/ui/kit';
 
 export default function Create() {
-  const { adopt } = useUrsa();
   const { c } = useTheme();
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);

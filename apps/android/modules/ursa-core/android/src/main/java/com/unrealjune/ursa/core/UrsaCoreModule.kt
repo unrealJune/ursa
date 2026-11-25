@@ -49,6 +49,33 @@ class UrsaCoreModule : Module() {
       throw UrsaCoreException(e.message ?: "Ursa failed")
     }
 
+  private suspend fun upload(uri: String, meta: Map<String, Any?>, task: String, staged: Boolean): Map<String, Any?> {
+    // Copying out of the gallery and drawing the thumbnail happen here, before the core sees the
+    // file; the time goes back with the result so the app's upload log can show it.
+    val preparing = System.nanoTime()
+    val prepared = withContext(Dispatchers.IO) { Media.prepare(context, Uri.parse(uri), meta) }
+    val prepareMs = (System.nanoTime() - preparing) / 1_000_000.0
+    try {
+      val request =
+        UploadRequest(
+          path = prepared.path,
+          name = prepared.name,
+          mime = prepared.mime,
+          createdMs = prepared.createdMs,
+          modifiedMs = prepared.modifiedMs,
+          width = prepared.width?.toUInt(),
+          height = prepared.height?.toUInt(),
+          thumbPath = prepared.thumbPath,
+        )
+      return call {
+        val item = if (staged) core.uploadStaged(request, progress(task)) else core.upload(request, progress(task))
+        item.toMap() + ("prepareMs" to prepareMs)
+      }
+    } finally {
+      withContext(Dispatchers.IO) { prepared.cleanup() }
+    }
+  }
+
   private fun progress(task: String) =
     object : ProgressListener {
       override fun onProgress(done: ULong, total: ULong) {
@@ -152,27 +179,16 @@ class UrsaCoreModule : Module() {
      * the core reads paths. `meta` may carry name, mime, createdMs, width and height.
      */
     AsyncFunction("upload") Coroutine { uri: String, meta: Map<String, Any?>, task: String ->
-      val prepared = withContext(Dispatchers.IO) { Media.prepare(context, Uri.parse(uri), meta) }
-      try {
-        call {
-          core.upload(
-            UploadRequest(
-              path = prepared.path,
-              name = prepared.name,
-              mime = prepared.mime,
-              createdMs = prepared.createdMs,
-              modifiedMs = prepared.modifiedMs,
-              width = prepared.width?.toUInt(),
-              height = prepared.height?.toUInt(),
-              thumbPath = prepared.thumbPath,
-            ),
-            progress(task),
-          ).toMap()
-        }
-      } finally {
-        withContext(Dispatchers.IO) { prepared.cleanup() }
-      }
+      upload(uri, meta, task, staged = false)
     }
+
+    /** Uploads without writing the library entry; `commitUploads` writes a batch of them at once. */
+    AsyncFunction("uploadStaged") Coroutine { uri: String, meta: Map<String, Any?>, task: String ->
+      upload(uri, meta, task, staged = true)
+    }
+
+    /** Writes every staged upload into the library in one change; resolves with how many. */
+    AsyncFunction("commitUploads") Coroutine { -> call { core.commitUploads().toInt() } }
 
     /** Downloads into the cache (once) and returns the file's URI, for viewing or sharing. */
     AsyncFunction("download") Coroutine { fileId: String, name: String, task: String ->
@@ -206,6 +222,13 @@ class UrsaCoreModule : Module() {
     AsyncFunction("delete") Coroutine { fileId: String ->
       call { core.delete(fileId) }
       File(context.cacheDir, "files/$fileId").deleteRecursively()
+      Unit
+    }
+
+    /** Several files in one library change: one index upload and one head save for all of them. */
+    AsyncFunction("deleteMany") Coroutine { fileIds: List<String> ->
+      call { core.deleteMany(fileIds) }
+      fileIds.forEach { File(context.cacheDir, "files/$it").deleteRecursively() }
       Unit
     }
 

@@ -3,12 +3,12 @@ import { Redirect, router } from 'expo-router';
 import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useUrsa } from '@/core/store';
+import { useSession } from '@/core/session';
 import { useTheme } from '@/theme';
 import { Button, Icon, Txt } from '@/ui/kit';
 
 export default function Welcome() {
-  const { phase } = useUrsa();
+  const phase = useSession((s) => s.phase);
   const { c } = useTheme();
   const insets = useSafeAreaInsets();
 
