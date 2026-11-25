@@ -96,7 +96,7 @@ jobs:
         working-directory: apps/windows/Ursa.App
         run: >
           dotnet publish -c Release -r ${{ matrix.rid }} -p:Platform=${{ matrix.platform }}
-          -p:Version=${{ env.VERSION }} -o ${{ runner.temp }}/publish
+          -p:Version=${{ env.VERSION }} -p:UrsaOtelEndpoint=${{ vars.OTEL_ENDPOINT }} -o ${{ runner.temp }}/publish
       - name: Check the host shipped
         shell: bash
         run: test -f "${RUNNER_TEMP}/publish/ursa-host.exe"

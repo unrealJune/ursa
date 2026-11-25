@@ -78,6 +78,13 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- with .Values.otel.endpoint }}
+            # Logs as OTLP to this collector, as ursa-node; the release name is its instance id.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            - name: OTEL_SERVICE_INSTANCE_ID
+              value: {{ $.Release.Name | quote }}
+            {{- end }}
             {{- with .Values.relayUrls }}
             - name: URSA_RELAY_URLS
               value: {{ join "," . | quote }}

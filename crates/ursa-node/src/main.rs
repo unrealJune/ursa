@@ -66,12 +66,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,iroh=warn,noq=warn".into()),
-        )
-        .init();
+    // OTEL_EXPORTER_OTLP_ENDPOINT (the chart's `otel.endpoint`) turns on export.
+    ursa_telemetry::init_console(
+        "info,iroh=warn,noq=warn",
+        false,
+        ursa_telemetry::Config::from_env("ursa-node", "node", env!("CARGO_PKG_VERSION")),
+    );
     let args = Args::parse();
 
     let store = match args.store.as_str() {

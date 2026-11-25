@@ -47,6 +47,8 @@ public sealed class HostClient : IAsyncDisposable
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardInputEncoding = new UTF8Encoding(false),
         };
+        // The host exports its own logs under this install's telemetry id.
+        foreach (var (k, v) in Telemetry.HostEnvironment()) psi.Environment[k] = v;
         var p = Process.Start(psi) ?? throw new HostException("could not start ursa-host.exe");
         p.EnableRaisingEvents = true;
         p.Exited += (_, _) =>

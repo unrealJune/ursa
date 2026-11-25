@@ -26,3 +26,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ursa-core.workspace = true
 ursa-proto.workspace = true
+ursa-telemetry = { path = "../ursa-telemetry" }

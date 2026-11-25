@@ -1,0 +1,34 @@
+[package]
+name = "ursa-ffi"
+description = "The Ursa device for mobile apps: ursa-client behind a UniFFI interface (Kotlin today)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# cdylib: the libursa_ffi.so the Android app loads. lib: lets uniffi-bindgen and tests use it.
+[lib]
+name = "ursa_ffi"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+# Generates the Kotlin bindings from a built library:
+#   cargo run -p ursa-ffi --features cli --bin uniffi-bindgen -- generate --library <lib> --language kotlin --out-dir <dir>
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uniffi = "0.31"
+ursa-client = { path = "../ursa-client" }
+ursa-core.workspace = true
+ursa-proto.workspace = true
+ursa-telemetry = { path = "../ursa-telemetry" }
+

@@ -245,6 +245,11 @@ pub enum HeadPut {
     Conflict(Box<Head>),
 }
 
+/// How long a request may take to be answered: 30 s, plus its body at 32 KiB/s (a slow relay).
+pub fn call_timeout(body_len: usize) -> std::time::Duration {
+    std::time::Duration::from_secs(30 + (body_len / (32 * 1024)) as u64)
+}
+
 impl NodeClient {
     /// Connects and authenticates with the device's certificate.
     pub async fn connect(endpoint: &Endpoint, addr: EndpointAddr, cert: &DeviceCert) -> Result<Self> {
@@ -266,7 +271,17 @@ impl NodeClient {
         self.conn.close_reason().is_some()
     }
 
+    /// Sends a request and reads the response header, within [`call_timeout`]. A node that
+    /// accepted the connection and then never answers would otherwise hold its caller forever:
+    /// a phone joining an account sat on its confirmation screen that way.
     async fn call(&self, req: &Request, body: Option<&[u8]>) -> Result<(Response, RecvStream)> {
+        let limit = call_timeout(body.map_or(0, |b| b.len()));
+        tokio::time::timeout(limit, self.call_unbounded(req, body))
+            .await
+            .map_err(|_| anyhow!("node {} did not answer within {}s", self.conn.remote_id().fmt_short(), limit.as_secs()))?
+    }
+
+    async fn call_unbounded(&self, req: &Request, body: Option<&[u8]>) -> Result<(Response, RecvStream)> {
         let (mut send, mut recv) = self.conn.open_bi().await?;
         write_header(&mut send, req).await?;
         if let Some(b) = body {

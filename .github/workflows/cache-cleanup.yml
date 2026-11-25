@@ -1,0 +1,35 @@
+name: Clean up pull-request caches
+
+# A pull request's builds save caches so its next push rebuilds only what changed, but GitHub
+# scopes them to refs/pull/<n>/merge: once the pull request closes nothing can read them again,
+# and they would sit in the repository's 10 GB, evicting the caches main and android-app keep warm
+# for every other pull request. This deletes them as soon as the pull request is merged or closed.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Delete this pull request's caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+          ids="$(gh cache list --repo "$REPO" --ref "$REF" --limit 1000 --json id --jq '.[].id')"
+          if [[ -z "$ids" ]]; then
+            echo "No caches under $REF."
+            exit 0
+          fi
+          n=0
+          for id in $ids; do
+            gh cache delete "$id" --repo "$REPO" && n=$((n + 1)) || echo "::warning::could not delete cache $id"
+          done
+          echo "Deleted $n caches under $REF."

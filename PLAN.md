@@ -604,6 +604,25 @@ objects rebuilt onto her replacement node, 0 lost. What the runs taught:
   is dead, and the dead node stays in the pool until someone removes it. Repair should offer to
   drop a node that holds nothing it can serve.
 
+### The Android app (2026-11-23, in progress)
+
+`apps/android`: Expo SDK 58 + UniFFI, the Street Cryptid stack. The core is crate `ursa-ffi`,
+`ursa-client` behind a typed UniFFI interface on its own multi-threaded tokio runtime (chunking,
+sealing and coding are CPU work and must not queue behind the network); `scripts/build-core.sh`
+builds it with cargo-ndk and generates the Kotlin bindings from the same library, and the local
+Expo module `modules/ursa-core` adds what only Android does (content URIs to paths, thumbnails
+through `ThumbnailUtils`, EXIF dates, MediaStore saves, "open with"). The account root lives in
+the Android Keystore (expo-secure-store), never in the core's directory.
+
+It looks like Android, not like a port: Material You colours from the wallpaper
+(`useMaterialColors`), Android's own navigation bar (`NativeTabs`), Compose switches and
+expressive progress indicators (`@expo/ui`), the native stack header, platform ripples, system
+dialogs and the system photo picker. Photos is a day-grouped grid; Files a list with filter
+chips; Account holds backup, nodes and repair, friends, devices, recovery and network. The same
+onboarding as Windows: create, link by code (QR both ways), recover from words or a key file,
+then add a node of your own. Camera-roll backup runs while the app is open; in the background
+(WorkManager) is next. `release-android.yml` builds the APK and releases `android-v*`.
+
 ### Protection you choose, and switching it (2026-11-25)
 
 **The choice.** The account head carries an optional `protection` (k-of-n). Unset, the code is

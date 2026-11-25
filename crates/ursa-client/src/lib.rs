@@ -11,6 +11,7 @@ pub mod gc;
 pub mod library;
 pub mod locator;
 mod objects;
+mod stats;
 pub mod storage;
 
 use std::collections::HashMap;
@@ -28,7 +29,7 @@ use tracing::{info, warn};
 use ursa_core::account::{Account, AccountId, DeviceCert};
 use ursa_core::crypto::AccountKey;
 use ursa_core::head::{AccountState, DeviceEntry, Friend, Head, NodeRef};
-use ursa_proto::link::{LinkCode, LinkHandler};
+use ursa_proto::link::{LinkCode, LinkHandler, LinkNetwork};
 use ursa_proto::{ClaimLink, HeadPut, NodeClient, NodeInfo, Role, parse_addr, ticket_of};
 
 pub use library::{Item, UploadMeta};
@@ -54,6 +55,20 @@ pub struct NetConfig {
     pub pkarr: Vec<String>,
 }
 
+impl NetConfig {
+    /// Whether two configs bind the same relays with the same token (blank lines and a blank
+    /// token count as none, as [`Device::start`] reads them).
+    pub fn same_relays(&self, other: &NetConfig) -> bool {
+        fn relays(c: &NetConfig) -> Vec<&str> {
+            c.relays.iter().map(|r| r.trim()).filter(|r| !r.is_empty()).collect()
+        }
+        fn token(c: &NetConfig) -> Option<&str> {
+            c.relay_token.as_deref().map(str::trim).filter(|t| !t.is_empty())
+        }
+        relays(self) == relays(other) && token(self) == token(other)
+    }
+}
+
 /// This machine, before or without an account.
 pub struct Device {
     data_dir: PathBuf,
@@ -61,6 +76,20 @@ pub struct Device {
     router: Router,
     link: LinkHandler,
     pkarr: Vec<url::Url>,
+    /// What it was started with: handed to a device it links, and compared with what a device
+    /// it joins through sends.
+    net: NetConfig,
+}
+
+/// A device that has joined an account through a link code.
+pub struct Linked {
+    pub root: AccountKey,
+    /// Opened on the device that joined, or on its replacement when the offering device's
+    /// network settings differed (`session.device`: callers keep that one from now on).
+    pub session: Arc<Session>,
+    /// The offering device's network settings, which the session now runs on; the caller
+    /// should keep them for the next start. None when the other device sent none.
+    pub network: Option<NetConfig>,
 }
 
 impl Device {
@@ -102,7 +131,7 @@ impl Device {
         } else {
             net.pkarr.iter().map(|u| u.parse().map_err(|e| anyhow!("bad pkarr relay {u}: {e}"))).collect::<Result<_>>()?
         };
-        Ok(Arc::new(Self { data_dir: data_dir.to_path_buf(), endpoint, router, link, pkarr }))
+        Ok(Arc::new(Self { data_dir: data_dir.to_path_buf(), endpoint, router, link, pkarr, net: net.clone() }))
     }
 
     pub fn id(&self) -> String {
@@ -140,7 +169,9 @@ impl Device {
     /// account's pkarr locator.
     pub async fn open(self: &Arc<Self>, root: AccountKey, device_name: &str, platform: &str) -> Result<Arc<Session>> {
         let session = Session::new(self.clone(), Account::from_root(root), device_name, platform);
-        if let Err(e) = session.load_head().await {
+        let loaded = session.load_head().await;
+        info!(ok = loaded.is_ok(), "open: head lookup finished");
+        if let Err(e) = loaded {
             // An account with no node yet lives only on the device that created it.
             match session.load_local() {
                 Some(state) => *session.head.lock().await = Some((None, state)),
@@ -149,6 +180,7 @@ impl Device {
         }
         // Make sure this device is listed (it is new on a recovery).
         if !session.state().await.devices.iter().any(|d| d.device == session.device.id()) {
+            info!("open: adding this device to the account");
             let entry = session.device_entry();
             session.update(move |s| s.devices.push(entry.clone())).await?;
         }
@@ -162,11 +194,26 @@ impl Device {
         device_name: &str,
         platform: &str,
         on_confirmation: impl FnOnce(String),
-    ) -> Result<(AccountKey, Arc<Session>)> {
-        let (root, _cert) = ursa_proto::link::join(&self.endpoint, code, device_name, platform, on_confirmation).await?;
+    ) -> Result<Linked> {
+        let joined = ursa_proto::link::join(&self.endpoint, code, device_name, platform, on_confirmation).await?;
+        info!(network = joined.network.is_some(), "join: the other device sent the account key");
+        let network = joined.network.map(|n| NetConfig { relays: n.relays, relay_token: n.relay_token, pkarr: self.net.pkarr.clone() });
+        // The account's nodes are reached through the account's relays, and an endpoint's relays
+        // are fixed when it binds: a device started without them (a phone fresh from install has
+        // no relay token) must restart on them before it can find the account. Same device key,
+        // so the same identity.
+        let device = match &network {
+            Some(n) if !self.net.same_relays(n) => {
+                info!(relays = n.relays.len(), "join: restarting on the other device's relays");
+                self.shutdown().await;
+                Device::start(&self.data_dir, n).await?
+            }
+            _ => self.clone(),
+        };
         // The offering device knows where the account lives; it sent no head, so look it up.
-        let session = self.open(root.clone(), device_name, platform).await?;
-        Ok((root, session))
+        let session = device.open(joined.root.clone(), device_name, platform).await?;
+        info!("join: done");
+        Ok(Linked { root: joined.root, session, network })
     }
 }
 
@@ -182,6 +229,14 @@ pub struct Session {
     down: std::sync::Mutex<HashMap<String, Instant>>,
     /// The newest head seen (None before the first save) and its opened state.
     head: Mutex<Option<(Option<Head>, AccountState)>>,
+    /// Held for the whole of a library index change. Changes on one device are queued here
+    /// rather than raced: two at once both built on the same index and head, every save but one
+    /// conflicted, and a phone deleting a few files in parallel exhausted the retries ("the
+    /// account head kept changing"). Other devices' changes are still merged by retrying.
+    index_lock: Mutex<()>,
+    /// Uploads whose objects are stored but whose index entries are not written yet (see
+    /// `upload_staged`): reads see them, and the next index change writes them.
+    pending: std::sync::Mutex<Vec<library::Staged>>,
 }
 
 /// A node in the pool, as seen right now.
@@ -235,6 +290,8 @@ impl Session {
             conns: Mutex::new(HashMap::new()),
             down: std::sync::Mutex::new(HashMap::new()),
             head: Mutex::new(None),
+            index_lock: Mutex::new(()),
+            pending: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -281,11 +338,13 @@ impl Session {
             .and_then(|r| r);
         match dialled {
             Ok(c) => {
+                info!(node = %short(&r.id), paths = %Self::paths_of(&c), "node reached");
                 self.down.lock().unwrap().remove(&r.id);
                 self.conns.lock().await.insert(r.id.clone(), c.clone());
                 Ok(c)
             }
             Err(e) => {
+                info!(node = %short(&r.id), "node not reached: {e:#}");
                 self.down.lock().unwrap().insert(r.id.clone(), Instant::now());
                 Err(e)
             }
@@ -313,12 +372,54 @@ impl Session {
         }
     }
 
+    /// How this device reaches each node it has a connection to now (`relay`, `direct`), keyed by
+    /// the short id the operation summaries use.
+    pub(crate) async fn paths_now(&self) -> HashMap<String, String> {
+        self.conns.lock().await.iter().map(|(id, c)| (short(id), Self::path_of(c))).collect()
+    }
+
+    /// Every path a connection has, the selected one starred, with its address and round trip:
+    /// `*ip 192.168.1.178:31842 12ms, relay https://iroh-wus.streetcrypt.id/ 140ms`. For the log
+    /// when a node is reached or a request on it fails, since "connected but nothing arrives"
+    /// (as away from home, where requests hung on connections that had opened) is told apart by
+    /// which path the data was going down.
+    pub fn paths_of(c: &NodeClient) -> String {
+        let paths = c.connection().paths();
+        let all: Vec<String> = paths
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}{} {:?} {}ms",
+                    if p.is_selected() { "*" } else { "" },
+                    if p.is_relay() { "relay" } else { "ip" },
+                    p.remote_addr(),
+                    p.rtt().as_millis()
+                )
+            })
+            .collect();
+        if all.is_empty() { "no paths".into() } else { all.join(", ") }
+    }
+
     // -----------------------------------------------------------------------------------------
     // The head
 
     /// Every node the head should live on: home nodes, then friends' nodes.
     fn head_nodes(state: &AccountState) -> Vec<NodeRef> {
         state.pool()
+    }
+
+    /// Re-reads the account from its nodes, for what other devices changed since this one last
+    /// looked: devices added, files uploaded, friends made. The head was otherwise read only when
+    /// the account was opened, so a phone's photos never reached a running Windows app. Keeps
+    /// what it has when no node answers.
+    pub async fn refresh(&self) -> Result<()> {
+        let before = self.seq().await;
+        self.load_head().await?;
+        let after = self.seq().await;
+        if after != before {
+            info!(?before, ?after, "refresh: the account changed elsewhere");
+        }
+        Ok(())
     }
 
     /// Reads the newest head from every node this device can think of: those in the current
@@ -371,7 +472,13 @@ impl Session {
                 },
             };
             let Some(r) = next else { break };
-            let Ok(h) = r else { continue };
+            let h = match r {
+                Ok(h) => h,
+                Err(e) => {
+                    info!("head: {e:#}");
+                    continue;
+                }
+            };
             reached += 1;
             if let Some(h) = h
                 && h.verify()
@@ -435,6 +542,7 @@ impl Session {
                 *self.head.lock().await = Some((None, state.clone()));
                 return Ok(state);
             }
+            info!(nodes = targets.len(), seq, "head save: writing");
             let results = futures_util::future::join_all(targets.iter().map(|n| {
                 let head = head.clone();
                 async move {
@@ -629,7 +737,9 @@ impl Session {
     /// Offers a link code for a new device. Each join attempt arrives on the receiver with the
     /// confirmation code to show and a sender for the person's yes or no.
     pub async fn offer_link(&self) -> (LinkCode, tokio::sync::mpsc::Receiver<(ursa_proto::link::Joiner, String, ursa_proto::link::Decision)>) {
-        self.device.link.offer(&self.device.endpoint, self.account.clone(), now_ms()).await
+        let net = &self.device.net;
+        let network = LinkNetwork { relays: net.relays.clone(), relay_token: net.relay_token.clone() };
+        self.device.link.offer(&self.device.endpoint, self.account.clone(), Some(network), now_ms()).await
     }
 
     pub async fn cancel_link(&self) {
