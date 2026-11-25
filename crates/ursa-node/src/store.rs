@@ -48,6 +48,7 @@ fn head_key(account: &AccountId) -> String {
 
 const OWNERS_KEY: &str = "node/owners.json";
 const GRANTS_KEY: &str = "node/grants.json";
+const UPTIME_KEY: &str = "node/uptime.json";
 
 impl Store {
     pub fn disk(root: PathBuf) -> Self {
@@ -238,6 +239,28 @@ impl Store {
 
     pub async fn set_grants(&self, grants: &BTreeMap<AccountId, u64>) -> Result<()> {
         self.put_raw(GRANTS_KEY, serde_json::to_vec_pretty(grants)?).await
+    }
+
+    pub async fn uptime(&self) -> Result<crate::uptime::Uptime> {
+        match self.get_raw(UPTIME_KEY).await? {
+            Some(b) => Ok(serde_json::from_slice(&b).unwrap_or_default()),
+            None => Ok(Default::default()),
+        }
+    }
+
+    pub async fn set_uptime(&self, u: &crate::uptime::Uptime) -> Result<()> {
+        self.put_raw(UPTIME_KEY, serde_json::to_vec(u)?).await
+    }
+
+    /// The disk's size and free space, for the disk backend. A bucket has no fixed size.
+    pub fn disk_space(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Disk { root } => {
+                let _ = std::fs::create_dir_all(root);
+                Some((fs2::total_space(root).ok()?, fs2::available_space(root).ok()?))
+            }
+            Self::S3 { .. } => None,
+        }
     }
 }
 

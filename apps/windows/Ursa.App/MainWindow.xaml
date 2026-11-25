@@ -46,6 +46,16 @@
                         <FontIcon Glyph="&#xE91B;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Content="Pool" Tag="pool">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE968;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Usage" Tag="usage">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xEDA2;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.MenuItems>
             <Frame x:Name="ContentFrame" />
         </NavigationView>

@@ -56,7 +56,12 @@ public sealed partial class MainWindow : Window
 
     private void OnNavigationChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        Type page = args.IsSettingsSelected ? typeof(SettingsPage) : typeof(GalleryPage);
+        Type page = args.IsSettingsSelected ? typeof(SettingsPage) : (args.SelectedItem as NavigationViewItem)?.Tag switch
+        {
+            "pool" => typeof(PoolPage),
+            "usage" => typeof(UsagePage),
+            _ => typeof(GalleryPage),
+        };
         if (ContentFrame.CurrentSourcePageType != page)
             ContentFrame.Navigate(page, null, new EntranceNavigationTransitionInfo());
     }

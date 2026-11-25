@@ -118,7 +118,7 @@
             <Border Style="{StaticResource Card}">
                 <StackPanel Spacing="12">
                     <TextBlock Style="{StaticResource Hint}"
-                               Text="Your library is coded across these: yours and your friends'. Any three of five shards rebuild a file, so two can be gone at once." />
+                               Text="Your library is coded across these: yours and your friends'. Choose how in Pool." />
                     <ItemsRepeater ItemsSource="{x:Bind Library.Pool}">
                         <ItemsRepeater.Layout>
                             <StackLayout Spacing="10" />

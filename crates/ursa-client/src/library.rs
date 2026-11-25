@@ -15,7 +15,7 @@ use ursa_core::crypto::{open_chunk, seal_chunk};
 use ursa_core::head::{IndexEntry, LibraryIndex};
 use ursa_core::manifest::{self, ChunkRef, FileManifest, ShardSet, StoredRef};
 
-use crate::objects::code_for;
+use crate::objects::codes_for;
 use crate::{Session, now_ms};
 
 /// Chunks in flight per upload or download.
@@ -93,14 +93,15 @@ impl Session {
 
     /// Applies `change` to the index and saves it, merging with concurrent changes: if the head
     /// moved under us, the change is re-applied to the newer index.
-    async fn change_index(&self, change: impl Fn(&mut LibraryIndex)) -> Result<()> {
+    pub(crate) async fn change_index(&self, change: impl Fn(&mut LibraryIndex)) -> Result<()> {
         for _ in 0..5 {
             let before = self.state().await.index.as_ref().map(|r| r.id);
             let mut idx = self.index().await?;
             change(&mut idx);
             let (id, sealed) = idx.seal(&self.account);
             let writable = self.writable().await;
-            let set = self.store_object(&sealed, code_for(writable.len(), false)?, &writable, rand_usize()).await?;
+            let (_, small) = codes_for(self.state().await.protection, writable.len())?;
+            let set = self.store_object(&sealed, small, &writable, rand_usize()).await?;
             let new = StoredRef { id, shards: set };
             let state = self
                 .update(move |s| {
@@ -130,7 +131,7 @@ impl Session {
         Ok(b)
     }
 
-    async fn manifest(&self, id: &ObjectId, entry: &IndexEntry) -> Result<FileManifest> {
+    pub(crate) async fn manifest(&self, id: &ObjectId, entry: &IndexEntry) -> Result<FileManifest> {
         let set = entry.at.as_ref().context("the index does not say where this file's manifest is")?;
         let mid = entry.manifest_id(id);
         let sealed = self.cached_or_fetch(&mid, set).await?;
@@ -170,8 +171,7 @@ impl Session {
 
     pub async fn upload(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
         let writable = self.writable().await;
-        let big = code_for(writable.len(), true)?;
-        let small = code_for(writable.len(), false)?;
+        let (big, small) = codes_for(self.state().await.protection, writable.len())?;
         let fmeta = tokio::fs::metadata(&meta.path).await.with_context(|| format!("read {}", meta.path.display()))?;
         let total = fmeta.len();
         let name = meta
@@ -390,7 +390,7 @@ impl Session {
     }
 }
 
-fn rand_usize() -> usize {
+pub(crate) fn rand_usize() -> usize {
     let mut b = [0u8; 8];
     getrandom::fill(&mut b).expect("OS randomness");
     usize::from_le_bytes(b)

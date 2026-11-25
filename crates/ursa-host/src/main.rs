@@ -74,6 +74,22 @@ enum Command {
     Download { file_id: String, out_path: PathBuf },
     Delete { file_id: String },
     Repair,
+    /// Everything the Pool and Usage screens show; `k`/`n` adds that shape to the choices.
+    Storage {
+        #[serde(default)]
+        k: Option<u16>,
+        #[serde(default)]
+        n: Option<u16>,
+    },
+    /// `k` and `n`, or neither for automatic.
+    SetProtection {
+        #[serde(default)]
+        k: Option<u16>,
+        #[serde(default)]
+        n: Option<u16>,
+    },
+    Recode,
+    SetGive { bytes: u64 },
 }
 
 fn default_quota_gb() -> u64 {
@@ -325,6 +341,29 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
         }
         Command::Delete { file_id } => {
             host.session().await?.delete(&file_id).await?;
+            Ok(json!({}))
+        }
+        Command::Storage { k, n } => {
+            let extra = k.zip(n).map(|(k, n)| ursa_client::storage::Shape { k, n });
+            Ok(serde_json::to_value(host.session().await?.storage(extra).await?)?)
+        }
+        Command::SetProtection { k, n } => {
+            let shape = match (k, n) {
+                (Some(k), Some(n)) => Some(ursa_client::storage::Shape { k, n }),
+                (None, None) => None,
+                _ => bail!("give both k and n, or neither"),
+            };
+            host.session().await?.set_protection(shape).await?;
+            Ok(json!({}))
+        }
+        Command::Recode => {
+            let s = host.session().await?;
+            let o = out.clone();
+            let r = s.recode(move |d, t| o.progress(d, t)).await?;
+            Ok(json!({ "report": r }))
+        }
+        Command::SetGive { bytes } => {
+            host.session().await?.set_give(bytes).await?;
             Ok(json!({}))
         }
         Command::Repair => {

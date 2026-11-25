@@ -6,6 +6,7 @@
 
 mod server;
 mod store;
+mod uptime;
 
 use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 use std::path::PathBuf;

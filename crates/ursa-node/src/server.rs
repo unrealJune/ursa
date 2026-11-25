@@ -13,6 +13,7 @@ use ursa_core::head::Head;
 use ursa_proto::{GrantInfo, MAX_OBJECT, NodeInfo, Request, Response, Role, read_body, read_header, write_header};
 
 use crate::store::Store;
+use crate::uptime::{HEARTBEAT_MS, Uptime};
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -29,6 +30,7 @@ struct Inner {
     usage: Mutex<HashMap<AccountId, u64>>,
     /// Serialises head compare-and-set.
     heads: Mutex<()>,
+    uptime: Mutex<Uptime>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -43,7 +45,10 @@ impl Node {
         let grants = store.grants().await?;
         let usage = store.usage().await?;
         info!(owners = owners.len(), grants = grants.len(), accounts_with_data = usage.len(), "store opened");
-        Ok(Self {
+        let mut uptime = store.uptime().await?;
+        uptime.start(now_ms());
+        store.set_uptime(&uptime).await?;
+        let node = Self {
             inner: Arc::new(Inner {
                 store,
                 node_id,
@@ -52,8 +57,26 @@ impl Node {
                 grants: RwLock::new(grants),
                 usage: Mutex::new(usage),
                 heads: Mutex::new(()),
+                uptime: Mutex::new(uptime),
             }),
-        })
+        };
+        // Extend the current span once a minute, so a stop shows as a gap.
+        let weak = Arc::downgrade(&node.inner);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(HEARTBEAT_MS as u64)).await;
+                let Some(inner) = weak.upgrade() else { break };
+                let u = {
+                    let mut u = inner.uptime.lock().await;
+                    u.beat(now_ms());
+                    u.clone()
+                };
+                if let Err(e) = inner.store.set_uptime(&u).await {
+                    warn!("save uptime: {e:#}");
+                }
+            }
+        });
+        Ok(node)
     }
 
     pub async fn claimed(&self) -> bool {
@@ -88,6 +111,15 @@ impl Node {
         } else {
             Vec::new()
         };
+        let up_30d = {
+            let mut u = self.inner.uptime.lock().await;
+            u.beat(now_ms());
+            u.fraction(now_ms())
+        };
+        let (disk_total_bytes, disk_free_bytes) = match (role == Role::Owner).then(|| self.inner.store.disk_space()).flatten() {
+            Some((t, f)) => (Some(t), Some(f)),
+            None => (None, None),
+        };
         NodeInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             backend: self.inner.store.kind().to_string(),
@@ -97,6 +129,9 @@ impl Node {
             used_bytes: used,
             quota_bytes: quota,
             grants,
+            up_30d,
+            disk_total_bytes,
+            disk_free_bytes,
         }
     }
 
@@ -278,6 +313,10 @@ impl ProtocolHandler for Node {
             });
         }
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

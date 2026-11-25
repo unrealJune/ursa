@@ -1,0 +1,508 @@
+<title>Ursa Pool &amp; Usage</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: the Windows app's shell (nav rail + 880px content column), WinUI card/stroke tokens, one accent. */
+:root {
+  --bg: #f3f3f3; --card: #ffffff; --card-2: #f9f9f9; --stroke: rgba(0,0,0,.08); --stroke-2: rgba(0,0,0,.14);
+  --fg: #1a1a1a; --fg-2: #5c5c5c; --fg-3: #8a8a8a;
+  --accent: #005fb8; --accent-fg: #ffffff; --accent-soft: rgba(0,95,184,.10);
+  --ok: #0f7b0f; --warn: #9d5d00; --bad: #c42b1c; --warn-soft: rgba(157,93,0,.10); --bad-soft: rgba(196,43,28,.09);
+  --s1: #005fb8; --s2: #4f8fd6; --s3: #9cc2ea; --s4: #c8c8c8; --s5: #e6e6e6;
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-d: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #202020; --card: #2b2b2b; --card-2: #262626; --stroke: rgba(255,255,255,.07); --stroke-2: rgba(255,255,255,.14);
+  --fg: #ffffff; --fg-2: #c5c5c5; --fg-3: #8f8f8f;
+  --accent: #60cdff; --accent-fg: #002135; --accent-soft: rgba(96,205,255,.12);
+  --ok: #6ccb5f; --warn: #fce100; --bad: #ff99a4; --warn-soft: rgba(252,225,0,.08); --bad-soft: rgba(255,153,164,.10);
+  --s1: #60cdff; --s2: #3a96c4; --s3: #24607e; --s4: #555555; --s5: #3a3a3a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #202020; --card: #2b2b2b; --card-2: #262626; --stroke: rgba(255,255,255,.07); --stroke-2: rgba(255,255,255,.14);
+  --fg: #ffffff; --fg-2: #c5c5c5; --fg-3: #8f8f8f;
+  --accent: #60cdff; --accent-fg: #002135; --accent-soft: rgba(96,205,255,.12);
+  --ok: #6ccb5f; --warn: #fce100; --bad: #ff99a4; --warn-soft: rgba(252,225,0,.08); --bad-soft: rgba(255,153,164,.10);
+  --s1: #60cdff; --s2: #3a96c4; --s3: #24607e; --s4: #555555; --s5: #3a3a3a; color-scheme: dark }
+
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; line-height: 1.45 }
+.shell { display: grid; grid-template-columns: 200px minmax(0,1fr); min-height: 100vh }
+nav.rail { padding: 16px 8px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--stroke) }
+.brand { font: 600 13px var(--font); color: var(--fg-2); padding: 4px 12px 12px; letter-spacing: .02em }
+.rail a { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 6px; color: var(--fg); text-decoration: none; position: relative }
+.rail a:hover { background: var(--stroke) }
+.rail a[aria-current="page"] { background: var(--stroke) }
+.rail a[aria-current="page"]::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 2px; background: var(--accent) }
+.rail a.dim { color: var(--fg-3); pointer-events: none }
+.rail .sep { height: 1px; background: var(--stroke); margin: 8px 12px }
+main { padding-block: 20px 48px; padding-left: max(32px, env(safe-area-inset-left, 0px)); padding-right: max(32px, env(safe-area-inset-right, 0px)) }
+.col { max-width: 880px; display: flex; flex-direction: column; gap: 8px }
+.col > * { min-width: 0 }
+h1 { font: 600 28px/1.2 var(--font-d); margin: 0 0 2px }
+h2 { font: 600 14px var(--font); margin: 18px 0 2px }
+.lede { color: var(--fg-2); margin: 0 0 8px; max-width: 64ch }
+.hint { color: var(--fg-2); font-size: 12px }
+.card { background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; padding: 16px 20px }
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap }
+.grow { flex: 1; min-width: 0 }
+.num { font-variant-numeric: tabular-nums }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--stroke-2); color: var(--fg-2); white-space: nowrap }
+.pill.acc { background: var(--accent-soft); border-color: transparent; color: var(--accent) }
+.pill.warn { background: var(--warn-soft); border-color: transparent; color: var(--warn) }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none }
+.dot.down { background: var(--bad) } .dot.prob { background: var(--warn) }
+button { font: inherit; cursor: pointer }
+.btn { padding: 6px 14px; border-radius: 4px; border: 1px solid var(--stroke-2); background: var(--card); color: var(--fg) }
+.btn.acc { background: var(--accent); color: var(--accent-fg); border-color: transparent }
+.btn:disabled { opacity: .45; cursor: default }
+:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px }
+
+/* Health line */
+.health { display: flex; align-items: center; gap: 10px; padding: 10px 16px }
+.health b { font-weight: 600 }
+
+/* Pool members strip */
+.members { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px }
+.member { padding: 10px 12px; border-radius: 6px; background: var(--card-2); border: 1px solid var(--stroke) }
+.member .who { display: flex; align-items: center; gap: 6px; font-weight: 600 }
+.member .what { font-size: 12px; color: var(--fg-2) }
+
+/* Scheme picker */
+.group-label { font-size: 12px; color: var(--fg-2); margin: 10px 0 6px; display: flex; align-items: baseline; gap: 8px }
+.group-label b { color: var(--fg); font-weight: 600; font-size: 13px }
+.opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px }
+.opt { text-align: left; background: var(--card); color: var(--fg); border: 1px solid var(--stroke); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; position: relative }
+.opt:hover:not(:disabled) { border-color: var(--stroke-2) }
+.opt[aria-checked="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent) }
+.opt:disabled { cursor: default; background: var(--card-2) }
+.opt:disabled .x, .opt:disabled .big { color: var(--fg-3) }
+.opt .top { display: flex; align-items: baseline; gap: 8px }
+.opt .big { font: 600 22px/1 var(--font-d) }
+.opt .sub { font-size: 12px; color: var(--fg-2) }
+.opt .x { font-size: 13px; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px }
+.opt .x span:nth-child(odd) { color: var(--fg-2) }
+.opt .tags { display: flex; gap: 4px; flex-wrap: wrap; min-height: 22px }
+.opt .lim { font-weight: 600 }
+
+/* Capacity compare */
+.cap-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap }
+.cap-big { font: 600 40px/1 var(--font-d) }
+.bars { display: grid; grid-template-columns: 92px minmax(0,1fr) 72px; gap: 6px 10px; align-items: center; margin-top: 14px; font-size: 13px }
+.bars .lab { color: var(--fg-2); white-space: nowrap }
+.bars .lab.sel { color: var(--fg); font-weight: 600 }
+.track { height: 14px; background: var(--card-2); border-radius: 3px; position: relative; border: 1px solid var(--stroke) }
+.fill { position: absolute; inset: 0 auto 0 0; background: var(--s3); border-radius: 2px }
+.fill.sel { background: var(--accent) }
+.usedmark { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--fg); border-radius: 1px }
+.bars .v { text-align: right }
+.split > i { display: block; height: 100% }
+.split { display: flex; height: 10px; border-radius: 3px; overflow: hidden; margin: 6px 0 4px; max-width: 420px }
+.limiter { margin-top: 14px; padding: 10px 12px; border-radius: 6px; background: var(--accent-soft); display: flex; gap: 10px; align-items: flex-start }
+.limiter.warn { background: var(--bad-soft) }
+.give { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 16px; align-items: center; margin-top: 14px }
+input[type=range] { width: 100%; accent-color: var(--accent) }
+details summary { cursor: pointer; color: var(--fg-2) }
+.stepper { display: inline-flex; align-items: center; border: 1px solid var(--stroke-2); border-radius: 4px; overflow: hidden }
+.stepper button { border: 0; background: var(--card-2); color: var(--fg); width: 28px; height: 28px }
+.stepper output { min-width: 32px; text-align: center }
+.applybar { display: flex; justify-content: flex-end; padding-top: 8px }
+.cap-big.over { color: var(--bad) }
+
+/* Usage */
+.meter { display: flex; height: 18px; border-radius: 4px; overflow: hidden; background: var(--card-2); border: 1px solid var(--stroke); margin: 14px 0 8px }
+.meter > i { display: block; height: 100% }
+.legend { display: flex; gap: 6px 16px; flex-wrap: wrap; font-size: 12px; color: var(--fg-2) }
+.legend span { display: inline-flex; align-items: center; gap: 6px }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px }
+.kv { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 3px 0 }
+.kv span:first-child { color: var(--fg-2) }
+.tbl-wrap { overflow-x: auto }
+table { width: 100%; border-collapse: collapse; font-size: 13px }
+th { text-align: left; font-weight: 400; color: var(--fg-2); font-size: 12px; padding: 4px 8px 6px; border-bottom: 1px solid var(--stroke) }
+td { padding: 8px; border-bottom: 1px solid var(--stroke); vertical-align: middle }
+tr:last-child td { border-bottom: 0 }
+td.r, th.r { text-align: right }
+.mini { height: 6px; background: var(--card-2); border: 1px solid var(--stroke); border-radius: 3px; position: relative; min-width: 80px }
+.mini i { position: absolute; inset: 0 auto 0 0; background: var(--s2); border-radius: 2px }
+.mini i.hot { background: var(--warn) }
+svg text { fill: var(--fg-2); font: 11px var(--font) }
+
+/* Notes */
+.notes ol, .notes ul { margin: 6px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; max-width: 70ch }
+.notes li b { font-weight: 600 }
+
+@media (max-width: 720px) {
+  .shell { grid-template-columns: 1fr }
+  nav.rail { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--stroke); padding: 8px max(16px, env(safe-area-inset-left, 0px)) 8px max(16px, env(safe-area-inset-right, 0px)) }
+  .brand, .rail .sep, .rail a.dim { display: none }
+  .rail a { white-space: nowrap }
+  .rail a[aria-current="page"]::before { left: 12px; right: 12px; top: auto; bottom: 0; width: auto; height: 3px }
+  main { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)) }
+  .two { grid-template-columns: 1fr }
+  .cap-big { font-size: 32px }
+  .bars { grid-template-columns: 76px minmax(0,1fr) 64px }
+}
+@media (prefers-reduced-motion: no-preference) { .fill, .meter > i, .mini i { transition: width .25s ease } }
+</style>
+
+<div class="shell">
+  <nav class="rail" aria-label="Sections">
+    <div class="brand">URSA · prototype</div>
+    <a class="dim">Library</a>
+    <a href="#pool" data-view="pool">Pool</a>
+    <a href="#usage" data-view="usage">Usage</a>
+    <a class="dim">Settings</a>
+    <div class="sep"></div>
+    <a href="#notes" data-view="notes">Design notes</a>
+  </nav>
+  <main><div class="col" id="view"></div></main>
+</div>
+
+<script>
+// ---------- Example pool (made-up figures for the prototype) ----------
+const OWN_DISK = 4000;   // GB on your home node
+const HOT_CACHE = 100;   // GB the home node keeps as whole copies
+const TARGET_H = 0.876;  // 99.99% readable = under ~53 min a year
+const TODAY_STORED = { Photos: 268, Videos: 121, Files: 23 }; // GB of your files (before coding)
+const HISTORY = [180, 230, 275, 320, 368, 412];               // Jun..Nov
+const MONTHS = ["Jun", "Jul", "Aug", "Sep", "Oct", "Nov"];
+
+const friends = [
+  { who: "Maya",   node: "maya-nas",      grantToYou: 500, up: .98,  give: 250, theyUse: 182 },
+  { who: "Theo",   node: "theo-tower + theo-pi", note: "same house, counts as one", grantToYou: 800, up: .97, give: 250, theyUse: 240 },
+  { who: "Priya",  node: "priya-mini",    grantToYou: 300, up: .99,  give: 200, theyUse: 96 },
+  { who: "Sam",    node: "sam-desktop",   grantToYou: 250, up: .96,  give: 150, theyUse: 31, downFor: 3 },
+  { who: "Jordan", node: "jordan-nas",    grantToYou: 400, up: .97,  give: 150, theyUse: 12, probation: 18 },
+];
+const OWN_UP = .995;
+
+const PRESETS = [
+  { k: 1, n: 2 }, { k: 4, n: 6 }, { k: 3, n: 5 }, { k: 1, n: 3 },
+  { k: 8, n: 12 }, { k: 6, n: 10 }, { k: 4, n: 8 },
+];
+
+const state = { current: { k: 3, n: 5 }, sel: { k: 3, n: 5 }, give: 1000, custom: null, applied: false };
+
+// ---------- Model ----------
+const domains = () => [{ own: true, up: OWN_UP }, ...friends.map(f => ({ ...f }))];
+const stored = () => Object.values(TODAY_STORED).reduce((a, b) => a + b, 0);
+const key = o => `${o.k}-${o.n}`;
+const same = (a, b) => a.k === b.k && a.n === b.n;
+
+function name(o) {
+  if (o.k === 1) return { big: `${o.n} copies`, sub: `Whole copies on ${o.n} nodes` };
+  return { big: `${(o.n / o.k).toFixed(2).replace(/0$/, "").replace(/\.0$/, "")}×`, sub: `${o.k}-of-${o.n} · cut into ${o.n}, any ${o.k} rebuild` };
+}
+
+// Most data D you can place: one shard per stripe per node (each holds ≤ D/k),
+// friends' nodes hold ≤ their grant to you, and what you put on friends ≤ what you give them.
+function limit(o, give = state.give, grantScale = 1) {
+  const ds = domains();
+  if (o.n > ds.length) return 0;
+  const ownCap = OWN_DISK - give - HOT_CACHE;
+  const ok = D => {
+    const per = D / o.k;
+    const own = Math.min(ownCap, per);
+    const fr = Math.min(give, friends.reduce((s, f) => s + Math.min(f.grantToYou * grantScale, per), 0));
+    return own + fr >= D * o.n / o.k - 1e-9;
+  };
+  let lo = 0, hi = 100000;
+  for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; ok(m) ? lo = m : hi = m; }
+  return Math.floor(lo);
+}
+
+// What binds the limit: giving more, or friends granting more?
+function binding(o) {
+  const L = limit(o);
+  const moreGive = limit(o, state.give + 200);
+  const moreGrant = limit(o, state.give, 1.25);
+  if (moreGive > L + 1) return { by: "give", gain: moreGive - L, step: 200 };
+  if (moreGrant > L + 1) return { by: "friends", gain: moreGrant - L };
+  return { by: "nodes" };
+}
+
+// Hours a year a stripe can't be read: more than n-k of its n nodes down at once.
+// Pieces rotate across every trusted node (probation nodes left out), so use their mean downtime.
+function hoursDown(o) {
+  const ups = domains().filter(d => !d.probation).map(d => d.up);
+  if (o.n > ups.length) return null;
+  const q = 1 - ups.reduce((a, b) => a + b, 0) / ups.length;
+  const p = new Array(o.n).fill(q);
+  let dist = [1];
+  for (const q of p) {
+    const nx = new Array(dist.length + 1).fill(0);
+    dist.forEach((v, i) => { nx[i] += v * (1 - q); nx[i + 1] += v * q; });
+    dist = nx;
+  }
+  const P = dist.slice(o.n - o.k + 1).reduce((a, b) => a + b, 0);
+  return P * 8760;
+}
+
+function availableNodes() { return domains().length; }
+function dependableNodes() { return domains().filter(d => !d.probation).length; }
+
+function recommended() {
+  const cands = PRESETS.filter(o => hoursDown(o) !== null && hoursDown(o) <= TARGET_H);
+  cands.sort((a, b) => (a.n / a.k) - (b.n / b.k) || (b.n - b.k) - (a.n - a.k));
+  return cands[0];
+}
+
+// ---------- Formatting ----------
+const gb = v => v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 2).replace(/\.?0+$/, "")} TB` : `${Math.round(v)} GB`;
+function hrs(h) {
+  if (h === null) return "—";
+  if (h < 1 / 60) return "under a minute";
+  if (h < 1) return `${Math.round(h * 60)} min`;
+  return `${h.toFixed(h < 10 ? 1 : 0)} h`;
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// ---------- Views ----------
+function healthLine() {
+  const cur = state.current, down = friends.filter(f => f.downFor).length;
+  const margin = cur.n - cur.k - down;
+  return `<div class="card health"><span class="dot"></span><div class="grow">
+    <b>All files readable</b> · ${down ? `Sam's node down ${friends.find(f => f.downFor).downFor} h · ` : ""}can lose ${margin} more node${margin === 1 ? "" : "s"}
+    <span class="hint"> · repair starts in 69 h if Sam doesn't return</span></div></div>`;
+}
+
+function poolView() {
+  const sel = state.sel, cur = state.current, nNodes = availableNodes(), rec = recommended();
+  const groups = {};
+  const opts = [...PRESETS];
+  if (state.custom && !opts.some(o => same(o, state.custom))) opts.push(state.custom);
+  opts.forEach(o => (groups[o.n - o.k] ??= []).push(o));
+
+  const card = o => {
+    const nm = name(o), locked = o.n > nNodes, L = limit(o), h = hoursDown(o);
+    const tag = locked ? `<span class="pill">Needs ${o.n} nodes</span>` : rec && same(o, rec) ? `<span class="pill acc">Recommended</span>` : "";
+    return `<button class="opt" role="radio" aria-checked="${same(o, sel)}" data-k="${o.k}" data-n="${o.n}" ${locked ? "disabled" : ""}>
+      <div class="top"><span class="big">${nm.big}</span><span class="sub">${o.k > 1 ? `${o.k} of ${o.n}` : ""}</span></div>
+      <div class="x num">
+        <span>Store</span><span class="lim">${locked ? "—" : gb(L)}</span>
+        <span>Offline</span><span>${locked || h === null ? "—" : `${hrs(h)}/yr`}</span>
+      </div>
+      <div class="tags">${tag}</div>
+    </button>`;
+  };
+
+  const groupNames = { 1: "Survives 1 down", 2: "Survives 2 down", 3: "Survives 3 down", 4: "Survives 4 down" };
+  const picker = Object.keys(groups).sort((a, b) => a - b).map(s => `
+    <div class="group-label"><b>${groupNames[s] ?? `Survives ${s} down`}</b></div>
+    <div class="opts" role="radiogroup" aria-label="${groupNames[s] ?? ""}">${groups[s].sort((a, b) => a.n / a.k - b.n / b.k).map(card).join("")}</div>`).join("");
+
+  const avail = opts.filter(o => o.n <= nNodes);
+  const lims = avail.map(o => ({ o, L: limit(o) }));
+  const max = Math.max(...lims.map(x => x.L), stored()) * 1.08;
+  const S = stored(), L = limit(sel);
+  const homeShare = 1 / sel.k, friendShare = (sel.n - 1) / sel.k;
+  const over = S > L;
+  const changing = !same(sel, cur);
+
+  return `
+  <h1>Pool</h1>
+
+  <h2>Members</h2>
+  <div class="card"><div class="members">
+    <div class="member"><div class="who">You</div><div class="what num">${(OWN_UP * 100).toFixed(1)}% up</div></div>
+    ${friends.map(f => `<div class="member"><div class="who">${esc(f.who)}</div><div class="what num">${(f.up * 100).toFixed(0)}% up · ${gb(f.grantToYou)}</div></div>`).join("")}
+  </div></div>
+
+  <h2>Protection</h2>
+  <div id="live-picker" data-live>${picker}</div>
+  <details class="card" style="padding:10px 16px" ${state.custom ? "open" : ""}><summary>Custom</summary>
+    <div class="row" style="margin-top:10px">
+      <span class="stepper"><button data-step="k-1" aria-label="Fewer needed">−</button><output class="num" id="ck">${(state.custom ?? sel).k}</output><button data-step="k+1" aria-label="More needed">+</button></span>
+      <span>of</span>
+      <span class="stepper"><button data-step="n-1" aria-label="Fewer pieces">−</button><output class="num" id="cn">${(state.custom ?? sel).n}</output><button data-step="n+1" aria-label="More pieces">+</button></span>
+    </div></details>
+
+  <h2>Capacity</h2>
+  <div class="card" id="live-cap" data-live>
+    <div class="cap-head">
+      <div class="cap-big num ${over ? "over" : ""}">${gb(L)}</div>
+      <div class="grow" style="min-width:220px">
+        <div class="split" aria-hidden="true"><i style="width:${homeShare / (homeShare + friendShare) * 100}%;background:var(--s2)"></i><i style="width:${friendShare / (homeShare + friendShare) * 100}%;background:var(--s1)"></i></div>
+        <div class="legend num"><span><i style="background:var(--s2)"></i>Yours ${homeShare.toFixed(2)}×</span><span><i style="background:var(--s1)"></i>Friends ${friendShare.toFixed(2)}×</span></div>
+      </div>
+    </div>
+    <div class="bars num" role="img" aria-label="Storage limit for each option, with your current ${gb(S)} marked">
+      ${lims.map(({ o, L: l }) => `<span class="lab ${same(o, sel) ? "sel" : ""}">${name(o).big}</span>
+        <span class="track"><span class="fill ${same(o, sel) ? "sel" : ""}" style="width:${l / max * 100}%"></span><span class="usedmark" style="left:${S / max * 100}%" title="Stored now: ${gb(S)}"></span></span>
+        <span class="v">${gb(l)}</span>`).join("")}
+    </div>
+  </div>
+  <div class="card">
+    <div class="give" style="margin-top:0">
+      <label for="give">Give friends</label><span class="num" id="live-givev" data-live><b>${gb(state.give)}</b></span>
+      <input type="range" id="give" min="0" max="${OWN_DISK - HOT_CACHE - 500}" step="50" value="${state.give}" style="grid-column:1/-1">
+    </div>
+  </div>
+
+  <div class="applybar" id="live-apply" data-live>
+    <button class="btn acc" id="apply" ${!changing || over ? "disabled" : ""}>${changing ? `Switch to ${name(sel).big}` : "In use"}</button>
+  </div>`;
+}
+
+function usageView() {
+  const cur = state.current, S = stored(), L = limit(cur), b = binding(cur);
+  const onHome = S / cur.k, onFriends = S * (cur.n - 1) / cur.k;
+  const theyUse = friends.reduce((s, f) => s + f.theyUse, 0);
+  const types = [["Photos", "var(--s1)"], ["Videos", "var(--s2)"], ["Files", "var(--s3)"]];
+  const perFriend = onFriends / friends.length; // placement spreads evenly at this size
+
+  // Growth chart
+  const W = 600, H = 170, padL = 40, padR = 12, padT = 12, padB = 24;
+  const months = [...MONTHS, "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun"];
+  const growth = (HISTORY.at(-1) - HISTORY[0]) / (HISTORY.length - 1);
+  const proj = months.slice(HISTORY.length - 1).map((_, i) => HISTORY.at(-1) + growth * i);
+  const yMax = Math.ceil(Math.max(L, ...proj) / 200) * 200;
+  const x = i => padL + i * (W - padL - padR) / (months.length - 1);
+  const y = v => padT + (1 - v / yMax) * (H - padT - padB);
+  const hist = HISTORY.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  const pr = proj.map((v, i) => `${x(i + HISTORY.length - 1)},${y(v)}`).join(" ");
+  const monthsToFull = Math.max(0, (L - S) / growth);
+  const fullIdx = HISTORY.length - 1 + monthsToFull;
+  const fullLabel = monthsToFull > 12 ? "more than a year" : `about ${Math.round(monthsToFull)} months`;
+  const ticks = [0, yMax / 2, yMax];
+
+  const homeUsed = onHome, friendsOnMe = theyUse, reservedFree = state.give - theyUse;
+  const freeMine = OWN_DISK - HOT_CACHE - state.give - homeUsed;
+  const disk = [["Yours", homeUsed, "var(--s1)"], ["Friends", friendsOnMe, "var(--s2)"], ["Reserved", reservedFree, "var(--s3)"], ["Cache", HOT_CACHE, "var(--s4)"], ["Free", freeMine, "var(--s5)"]];
+
+  return `
+  <h1>Usage</h1>
+
+  <div class="card">
+    <div class="cap-big num">${gb(S)} <span style="font-size:18px;color:var(--fg-2);font-weight:400">of ${gb(L)}</span></div>
+    <div class="meter" role="img" aria-label="${gb(S)} of ${gb(L)} used">
+      ${types.map(([t, c]) => `<i style="width:${TODAY_STORED[t] / L * 100}%;background:${c}"></i>`).join("")}
+    </div>
+    <div class="legend num">${types.map(([t, c]) => `<span><i style="background:${c}"></i>${t} ${gb(TODAY_STORED[t])}</span>`).join("")}<span><i style="background:var(--s5);border:1px solid var(--stroke-2)"></i>Free ${gb(L - S)}</span></div>
+  </div>
+
+  <div class="two">
+    <div class="card">
+      <h2 style="margin-top:0">In the pool</h2>
+      <div class="kv num"><span>Your node</span><span>${gb(onHome)}</span></div>
+      <div class="kv num"><span>Friends' nodes</span><span>${gb(onFriends)}</span></div>
+      <div class="kv num" style="border-top:1px solid var(--stroke);margin-top:4px;padding-top:6px"><span>Total</span><span><b>${gb(onHome + onFriends)}</b></span></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Fair share</h2>
+      <div class="kv num"><span>On friends</span><span>${gb(onFriends)} of ${gb(state.give)}</span></div>
+      <div class="meter" style="margin:4px 0 8px;height:10px"><i style="width:${Math.min(100, onFriends / state.give * 100)}%;background:var(--s1)"></i></div>
+      <div class="kv num"><span>Friends on you</span><span>${gb(theyUse)}</span></div>
+    </div>
+  </div>
+
+  <h2>Your pieces</h2>
+  <div class="card tbl-wrap"><table>
+    <thead><tr><th>Node</th><th class="r">Stored</th><th>Limit</th></tr></thead>
+    <tbody>
+      <tr><td><b>You</b></td><td class="r num">${gb(onHome)}</td><td></td></tr>
+      ${friends.map(f => { const pct = perFriend / f.grantToYou; return `<tr>
+        <td><b>${esc(f.who)}</b></td>
+        <td class="r num">${gb(perFriend)}</td>
+        <td><div class="row" style="gap:8px;flex-wrap:nowrap"><div class="mini grow"><i style="width:${Math.min(100, pct * 100)}%"></i></div><span class="num hint">${gb(f.grantToYou)}</span></div></td></tr>`; }).join("")}
+    </tbody></table></div>
+
+  <h2>Hosting</h2>
+  <div class="card tbl-wrap"><table>
+    <thead><tr><th>Friend</th><th class="r">Stored</th><th>Limit</th></tr></thead>
+    <tbody>${friends.map(f => { const pct = f.theyUse / f.give; return `<tr>
+      <td><b>${esc(f.who)}</b></td><td class="r num">${gb(f.theyUse)}</td>
+      <td><div class="row" style="gap:8px;flex-wrap:nowrap"><div class="mini grow"><i style="width:${pct * 100}%"></i></div><span class="num hint">${gb(f.give)}</span></div></td></tr>`; }).join("")}
+    </tbody></table></div>
+
+  <h2>Disk · ${gb(OWN_DISK)}</h2>
+  <div class="card">
+    <div class="meter" style="margin-top:0" role="img" aria-label="Disk use on your node">${disk.map(([, v, c]) => `<i style="width:${v / OWN_DISK * 100}%;background:${c}"></i>`).join("")}</div>
+    <div class="legend num">${disk.map(([t, v, c]) => `<span><i style="background:${c};${c.includes("s5") ? "border:1px solid var(--stroke-2)" : ""}"></i>${t} ${gb(v)}</span>`).join("")}</div>
+  </div>
+
+  <h2>Growth</h2>
+  <div class="card">
+    <div class="tbl-wrap"><svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:420px;display:block" role="img" aria-label="Files stored per month with projection to the limit">
+      ${ticks.map(t => `<line x1="${padL}" x2="${W - padR}" y1="${y(t)}" y2="${y(t)}" stroke="var(--stroke)" fill="none"/><text x="${padL - 6}" y="${y(t) + 4}" text-anchor="end">${gb(t)}</text>`).join("")}
+      <line x1="${padL}" x2="${W - padR}" y1="${y(L)}" y2="${y(L)}" stroke="var(--fg-3)" stroke-dasharray="2 3" fill="none"/>
+      <text x="${W - padR}" y="${y(L) - 5}" text-anchor="end">${gb(L)}</text>
+      <polygon points="${x(0)},${y(0)} ${hist} ${x(HISTORY.length - 1)},${y(0)}" fill="var(--accent-soft)"/>
+      <polyline points="${hist}" fill="none" stroke="var(--accent)" stroke-width="2"/>
+      <polyline points="${pr}" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 4"/>
+      <circle cx="${x(HISTORY.length - 1)}" cy="${y(S)}" r="4" fill="var(--accent)"/>
+      ${fullIdx <= months.length - 1 ? `<circle cx="${x(fullIdx)}" cy="${y(L)}" r="4" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>` : ""}
+      ${months.map((m, i) => `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${m}</text>`).join("")}
+    </svg></div>
+  </div>`;
+}
+
+function notesView() {
+  return `<div class="notes">
+  <div><h1>Design notes</h1><p class="lede">What this prototype proposes, and what still needs a decision. Figures are examples: a six-household pool with Sam's node down and Jordan's new.</p></div>
+  <div class="card"><h2 style="margin-top:0">Setting up the pool</h2><ol>
+    <li><b>Lead with what survives, then what it costs.</b> Options are grouped by "survives N nodes down". Inside a group, the name is the overhead (1.5×, 1.67×) or, for replication, "2 copies". k-of-n is the subtitle and lives under "Set the pieces yourself".</li>
+    <li><b>Every option shows "You can store".</b> That's the number people choose on. The bar chart compares all of them at once, to scale, with today's usage marked so an option that would leave you over is obvious.</li>
+    <li><b>No explainer copy, status dots or status text on either screen.</b> Labels and numbers only; the "Give friends" slider is the one lever on capacity.</li>
+    <li><b>Options the pool can't support stay visible, locked,</b> marked with the node count they need. It shows that a bigger pool is cheaper for the same safety.</li>
+    <li><b>Recommended = the cheapest option that reaches 99.99% readable</b>, using measured uptime and leaving out nodes still on probation. Here that's 1.67× (3-of-5), today's default.</li>
+    <li><b>Switching re-cuts in the background</b>, with a time estimate; it's blocked if the new limit is below what you already store.</li>
+  </ol></div>
+  <div class="card"><h2 style="margin-top:0">Usage</h2><ol>
+    <li><b>Three numbers, kept apart:</b> your files (412 GB), what they take in the pool (687 GB at 1.67×), and give vs. put (fair share). Mixing the first two is the classic confusion.</li>
+    <li><b>Per node, per friend</b>, both directions: where your pieces are against what each friend gives you, and what each friend uses of what you give them. </li>
+    <li><b>Your node's disk</b> splits into your pieces, friends' pieces, given but unused, hot cache and free.</li>
+    <li><b>Growth with a projection to the limit</b> for the current option, so "full in about 7 months" has a picture behind it.</li>
+  </ol></div>
+  <div class="card"><h2 style="margin-top:0">Decide</h2><ul>
+    <li><b>Do pieces on your own node count toward fair share?</b> The prototype says no: fair share caps what you put on friends' disks. A side effect: "2 copies" (one at home, one with a friend) lets you store more than 1.67× with the same giving, because only half its bytes land on friends. Is that the right incentive, or should the home copy count?</li>
+    <li><b>Per-folder protection now or later?</b> The plan has Standard / Important / Home + pool / Archive per folder. This prototype sets a pool default only.</li>
+    <li><b>What happens when a friend lowers what they give you</b> below what's stored there: move pieces elsewhere automatically, or ask first?</li>
+    <li><b>The fair-share ratio</b> (1:1 here) and whether the slider shows one total or per-friend grants.</li>
+    <li><b>Below-target options</b> (e.g. if uptime drops): allow with a warning, as here, or hide them?</li>
+  </ul></div>
+  <div class="card"><h2 style="margin-top:0">How the limit is worked out</h2>
+    <p style="margin:0;max-width:70ch">For k-of-n each node holds at most one piece of each stripe, so at most D/k of D GB of files. The most you can store is the largest D where your node (≤ D/k) plus friends' nodes (each ≤ min(what they give you, D/k), all together ≤ what you give) can hold D·n/k. Unreadable hours = chance that more than n−k of a stripe's n nodes are down at once × 8,760, with each node down at the trusted nodes' mean measured rate (2%).</p></div>
+  </div>`;
+}
+
+// ---------- Router & events ----------
+const views = { pool: poolView, usage: usageView, notes: notesView };
+const currentView = () => { const v = (location.hash || "#pool").slice(1); return views[v] ? v : "pool"; };
+// Re-render only the regions marked data-live, so the slider keeps its drag.
+function patch() {
+  const tmp = document.createElement("div");
+  tmp.innerHTML = views[currentView()]();
+  tmp.querySelectorAll("[data-live]").forEach(n => { const old = document.getElementById(n.id); if (old) old.replaceWith(n); });
+}
+function render() {
+  const view = currentView();
+  document.getElementById("view").innerHTML = views[view]();
+  document.querySelectorAll(".rail a[data-view]").forEach(a => { if (a.dataset.view !== view) a.removeAttribute("aria-current"); else a.setAttribute("aria-current", "page"); });
+}
+window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
+
+document.addEventListener("click", e => {
+  const opt = e.target.closest(".opt");
+  if (opt && !opt.disabled) { state.sel = { k: +opt.dataset.k, n: +opt.dataset.n }; state.applied = false; render(); return; }
+  const st = e.target.closest("[data-step]");
+  if (st) {
+    const c = { ...(state.custom ?? state.sel) };
+    const [f, d] = [st.dataset.step[0], st.dataset.step.slice(1)];
+    c[f] += +d;
+    c.n = Math.max(2, Math.min(availableNodes(), c.n));
+    c.k = Math.max(1, Math.min(c.n - 1, c.k));
+    state.custom = c; state.sel = c; state.applied = false; render(); return;
+  }
+  if (e.target.id === "apply") { state.current = { ...state.sel }; state.applied = true; render(); }
+});
+document.addEventListener("input", e => {
+  if (e.target.id === "give") {
+    state.give = +e.target.value;
+    patch();
+  }
+});
+render();
+</script>

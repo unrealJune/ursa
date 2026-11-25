@@ -58,6 +58,10 @@ pub struct AccountState {
     /// The current library index object, if anything has been stored.
     #[serde(default)]
     pub index: Option<crate::manifest::StoredRef>,
+    /// The code the account chose for its files (any `k` of `n` pieces rebuild one). `None`:
+    /// picked from the pool's size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<crate::coding::Code>,
 }
 
 impl AccountState {

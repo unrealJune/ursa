@@ -98,6 +98,14 @@ pub struct NodeInfo {
     /// Owners only: every account granted space, with use and quota.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<GrantInfo>,
+    /// Fraction of the last 30 days (or since it first ran) the node was up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_30d: Option<f64>,
+    /// Owners only, disk backend: the disk's size and free space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

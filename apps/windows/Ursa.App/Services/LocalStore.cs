@@ -7,7 +7,9 @@ namespace Ursa.App.Services;
 /// <summary>The app's own files under %LOCALAPPDATA%\Ursa. Secrets are DPAPI-protected for this user.</summary>
 public static class LocalStore
 {
+    /// <summary>URSA_DATA_DIR runs a second, separate copy while developing.</summary>
     public static string Root { get; } =
+        Environment.GetEnvironmentVariable("URSA_DATA_DIR") is { Length: > 0 } dir ? dir :
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Ursa");
 
     public static string HostDataDir => Path.Combine(Root, "host");

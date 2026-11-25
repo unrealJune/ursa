@@ -1,0 +1,66 @@
+<Page
+    x:Class="Ursa.App.Pages.PoolPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Background="Transparent">
+    <Page.Resources>
+        <Style x:Key="PoolCard" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="20,16" />
+        </Style>
+    </Page.Resources>
+    <ScrollViewer x:Name="Scroller" SizeChanged="OnScrollerSized">
+        <StackPanel x:Name="Column" Padding="32,16,32,32" Spacing="8" MaxWidth="880" HorizontalAlignment="Center">
+            <TextBlock Text="Pool" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,12" />
+            <InfoBar x:Name="ErrorBar" Severity="Error" IsOpen="False" />
+            <ProgressRing x:Name="LoadingRing" IsActive="True" HorizontalAlignment="Left" Width="24" Height="24" />
+
+            <StackPanel x:Name="Body" Spacing="8" Visibility="Collapsed">
+                <TextBlock Text="Members" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,4" />
+                <ContentControl x:Name="MembersHost" HorizontalContentAlignment="Stretch" />
+
+                <TextBlock Text="Protection" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
+                <StackPanel x:Name="ChoicesHost" Spacing="4" />
+                <Expander x:Name="CustomExpander" Header="Custom" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,4,0,0">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <NumberBox x:Name="CustomK" Minimum="1" Maximum="31" Value="3" SpinButtonPlacementMode="Inline" SmallChange="1" />
+                        <TextBlock Text="of" VerticalAlignment="Center" />
+                        <NumberBox x:Name="CustomN" Minimum="2" Maximum="32" Value="5" SpinButtonPlacementMode="Inline" SmallChange="1" />
+                        <Button Content="Show" Click="OnCustom" />
+                    </StackPanel>
+                </Expander>
+
+                <TextBlock Text="Capacity" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,4" />
+                <ContentControl x:Name="CapacityHost" HorizontalContentAlignment="Stretch" />
+                <Border Style="{StaticResource PoolCard}">
+                    <Grid RowSpacing="4">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Give friends" />
+                        <TextBlock x:Name="GiveValue" Grid.Column="1" FontWeight="SemiBold" />
+                        <Slider x:Name="GiveSlider" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,4,0,0"
+                                StepFrequency="1" ValueChanged="OnGiveChanged" />
+                    </Grid>
+                </Border>
+
+                <Grid ColumnSpacing="12" Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ProgressBar x:Name="SwitchProgress" VerticalAlignment="Center" Visibility="Collapsed" />
+                    <Button x:Name="SwitchButton" Grid.Column="1" Style="{StaticResource AccentButtonStyle}" Click="OnSwitch" />
+                </Grid>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

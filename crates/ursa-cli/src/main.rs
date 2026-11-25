@@ -103,6 +103,22 @@ enum Cmd {
     },
     /// Republish the account's locator record.
     Publish,
+    /// Choose the code for this account's files: any K of N pieces rebuild a file. --auto
+    /// goes back to picking it from the pool's size. Run `recode` to move existing files.
+    Protection {
+        #[arg(long, required_unless_present = "auto")]
+        k: Option<u16>,
+        #[arg(long, required_unless_present = "auto")]
+        n: Option<u16>,
+        #[arg(long, conflicts_with_all = ["k", "n"])]
+        auto: bool,
+    },
+    /// Move every file to the chosen protection, deleting the old pieces.
+    Recode,
+    /// What the account stores, what each protection choice would let it store, the pool.
+    Storage,
+    /// Give friends this much space in total on your nodes, split equally.
+    Give { gb: f64 },
 }
 
 fn root_path(profile: &Path) -> PathBuf {
@@ -280,6 +296,28 @@ async fn run(cli: &Cli, device: &Arc<Device>, platform: &str) -> Result<()> {
             let account = Account::from_root(load_root(&cli.profile)?);
             std::fs::write(path, KeyFile::create(&account, passphrase).map_err(|e| anyhow!("{e}"))?.to_json())?;
             println!("{}", path.display());
+        }
+        Cmd::Protection { k, n, auto } => {
+            let s = session(cli, device, platform).await?;
+            let shape = if *auto { None } else { Some(ursa_client::storage::Shape { k: k.unwrap(), n: n.unwrap() }) };
+            s.set_protection(shape).await?;
+            println!("{}", serde_json::to_string(&s.storage(None).await?.protection)?);
+        }
+        Cmd::Recode => {
+            let s = session(cli, device, platform).await?;
+            let r = s.recode(|_, _| {}).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            if !r.failures.is_empty() {
+                bail!("{} file(s) could not be re-coded", r.failures.len());
+            }
+        }
+        Cmd::Storage => {
+            let s = session(cli, device, platform).await?;
+            println!("{}", serde_json::to_string_pretty(&s.storage(None).await?)?);
+        }
+        Cmd::Give { gb } => {
+            let s = session(cli, device, platform).await?;
+            s.set_give((gb * 1e9) as u64).await?;
         }
         Cmd::Publish => {
             let s = session(cli, device, platform).await?;

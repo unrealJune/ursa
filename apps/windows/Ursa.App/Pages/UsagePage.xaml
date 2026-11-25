@@ -1,0 +1,14 @@
+<Page
+    x:Class="Ursa.App.Pages.UsagePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Background="Transparent">
+    <ScrollViewer x:Name="Scroller" SizeChanged="OnScrollerSized">
+        <StackPanel x:Name="Column" Padding="32,16,32,32" Spacing="8" MaxWidth="880" HorizontalAlignment="Center">
+            <TextBlock Text="Usage" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,12" />
+            <InfoBar x:Name="ErrorBar" Severity="Error" IsOpen="False" />
+            <ProgressRing x:Name="LoadingRing" IsActive="True" HorizontalAlignment="Left" Width="24" Height="24" />
+            <StackPanel x:Name="Body" Spacing="8" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

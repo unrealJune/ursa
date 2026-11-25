@@ -85,7 +85,11 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
             if (HasAccount)
             {
                 await RefreshPoolAsync();
-                if (IsConnected) await RefreshAsync();
+                if (IsConnected)
+                {
+                    await RefreshAsync();
+                    _ = ResumeSwitchAsync();
+                }
             }
         }
         catch (Exception e)
@@ -231,6 +235,71 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
 
     public async Task<string> KeyFileAsync(string passphrase) =>
         (await host.CallAsync("key_file", new { passphrase })).GetProperty("key_file").GetString() ?? "";
+
+    /// <summary>The storage report; <paramref name="extra"/> adds a shape being considered to the choices.</summary>
+    public async Task<StorageReport> StorageAsync((int K, int N)? extra = null) =>
+        StorageReport.FromJson(await host.CallAsync("storage", extra is { } x ? new { k = x.K, n = x.N } : null));
+
+    // -------------------------------------------------------------------------------------
+    // Switching protection. Runs here, not in a page: it keeps going while you use the rest of
+    // the app, and the choice is saved first, so a switch cut short by closing the app picks up
+    // again at the next start.
+
+    private bool switching;
+    private double switchPercent;
+    private string? switchError;
+    public bool IsSwitching { get => switching; private set => Set(ref switching, value); }
+    public double SwitchPercent { get => switchPercent; private set => Set(ref switchPercent, value); }
+    public string? SwitchError { get => switchError; set => Set(ref switchError, value); }
+    /// <summary>Raised on the UI thread when a switch ends, finished or not.</summary>
+    public event Action? SwitchEnded;
+
+    /// <summary>Chooses <paramref name="k"/>-of-<paramref name="n"/> and moves the library to it in the background.</summary>
+    public async Task StartSwitchAsync(int k, int n)
+    {
+        if (IsSwitching) return;
+        await host.CallAsync("set_protection", new { k, n });
+        _ = RecodeInBackgroundAsync();
+    }
+
+    /// <summary>At start: finishes a switch that was cut short.</summary>
+    private async Task ResumeSwitchAsync()
+    {
+        try
+        {
+            var r = await StorageAsync();
+            if (r.Chosen && r.PendingFiles > 0) _ = RecodeInBackgroundAsync();
+        }
+        catch { /* nodes down: the next start tries again */ }
+    }
+
+    private async Task RecodeInBackgroundAsync()
+    {
+        if (IsSwitching) return;
+        IsSwitching = true;
+        SwitchPercent = 0;
+        SwitchError = null;
+        try
+        {
+            var r = (await host.CallAsync("recode", progress: new Progress<(long Done, long Total)>(p =>
+            {
+                if (p.Total > 0) SwitchPercent = 100.0 * p.Done / p.Total;
+            }))).GetProperty("report");
+            int failed = r.GetProperty("failures").GetArrayLength();
+            if (failed > 0) SwitchError = $"{failed} file(s) could not be moved. Switch again when every node is up.";
+        }
+        catch (Exception e)
+        {
+            SwitchError = e.Message;
+        }
+        finally
+        {
+            IsSwitching = false;
+            OnUi(() => SwitchEnded?.Invoke());
+        }
+    }
+
+    public async Task SetGiveAsync(long bytes) => await host.CallAsync("set_give", new { bytes });
 
     public async Task<JsonElement> RepairAsync(IProgress<(long Done, long Total)>? progress = null) =>
         (await host.CallAsync("repair", progress: progress)).GetProperty("report");

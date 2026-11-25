@@ -15,20 +15,56 @@ use crate::{Session, short};
 /// How long a fetch waits with nothing arriving before it asks one more node for a spare shard.
 const HEDGE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The code for an object, given how many failure domains are writable. Big objects (chunks)
-/// are erasure-coded, 3-of-5 with five people; small ones (manifests, indexes, thumbnails) are
-/// cheap to copy whole, three times.
-pub(crate) fn code_for(domains: usize, big: bool) -> Result<Code> {
+/// The code picked when the account has not chosen one: 3-of-5 with five people, fewer
+/// pieces in a smaller pool.
+pub fn auto_code(domains: usize) -> Code {
+    let n = domains.clamp(1, 5);
+    Code { k: if n >= 3 { n as u16 - 2 } else { 1 }, n: n as u16 }
+}
+
+/// The codes for big objects (chunks) and small ones (manifests, indexes, thumbnails), given the
+/// account's choice and how many failure domains are writable now. Small objects are cheap to
+/// copy whole: at least three copies, and enough to survive as many nodes down as the chunks.
+/// If the pool cannot take the chosen code right now (nodes down), the automatic one is used
+/// and a later re-code moves those files to the choice.
+pub(crate) fn codes_for(protection: Option<Code>, domains: usize) -> Result<(Code, Code)> {
     if domains == 0 {
         bail!("no node will take this account's data: add a node you own, or a friend's");
     }
-    let (k, n) = if big {
-        let n = domains.min(5);
-        (if n >= 3 { n - 2 } else { 1 }, n)
-    } else {
-        (1, domains.min(3))
+    let big = match protection {
+        Some(c) if (c.n as usize) <= domains => c,
+        Some(c) => {
+            debug!(want = %format!("{}-of-{}", c.k, c.n), domains, "not enough nodes for the chosen protection");
+            auto_code(domains)
+        }
+        None => auto_code(domains),
     };
-    Code::new(k as u16, n as u16).map_err(|e| anyhow!("{e}"))
+    let copies = (big.n - big.k + 1).max(3).min(domains as u16);
+    let small = Code::new(1, copies).map_err(|e| anyhow!("{e}"))?;
+    Ok((big, small))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_is_three_of_five_with_five_people() {
+        assert_eq!(auto_code(5), Code { k: 3, n: 5 });
+        assert_eq!(auto_code(8), Code { k: 3, n: 5 });
+        assert_eq!(auto_code(2), Code { k: 1, n: 2 });
+    }
+
+    #[test]
+    fn a_choice_is_used_when_the_pool_can_take_it() {
+        let c = Code { k: 4, n: 6 };
+        assert_eq!(codes_for(Some(c), 6).unwrap(), (c, Code { k: 1, n: 3 }));
+        // Four copies of small objects survive the same three nodes down as 1-of-4 chunks.
+        assert_eq!(codes_for(Some(Code { k: 1, n: 4 }), 6).unwrap().1, Code { k: 1, n: 4 });
+        // Too few nodes up: the automatic code.
+        assert_eq!(codes_for(Some(c), 5).unwrap().0, Code { k: 3, n: 5 });
+        assert!(codes_for(None, 0).is_err());
+    }
 }
 
 impl Session {
@@ -77,7 +113,7 @@ impl Session {
         Ok(ShardSet { code, sealed_len: bytes.len() as u64, shards: placed })
     }
 
-    fn node_ref(&self, id: &str, state: &ursa_core::head::AccountState) -> NodeRef {
+    pub(crate) fn node_ref(&self, id: &str, state: &ursa_core::head::AccountState) -> NodeRef {
         state.pool().into_iter().find(|n| n.id == id).unwrap_or(NodeRef { id: id.to_string(), ticket: None, label: String::new() })
     }
 

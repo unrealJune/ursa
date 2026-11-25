@@ -6,9 +6,11 @@
 //!   friends, library index), keeps connections to the pool, stores and fetches coded objects,
 //!   and offers link codes to new devices.
 
+pub mod capacity;
 pub mod library;
 pub mod locator;
 mod objects;
+pub mod storage;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -191,6 +193,7 @@ pub struct PoolNode {
     pub reachable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// What the node said now or, if it is unreachable, the last time it answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub info: Option<NodeInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -563,7 +566,7 @@ impl Session {
                 }
             }
         }
-        futures_util::future::join_all(entries.into_iter().map(|(n, owner)| async move {
+        let checked = futures_util::future::join_all(entries.into_iter().map(|(n, owner)| async move {
             match async {
                 let c = self.node(&n).await?;
                 let info = c.info().await?;
@@ -578,7 +581,27 @@ impl Session {
                 }
             }
         }))
-        .await
+        .await;
+        self.remember_node_info(checked)
+    }
+
+    /// Keeps what each node last said (its uptime, the space it gives), so a node that is down
+    /// now still shows its figures.
+    fn remember_node_info(&self, mut nodes: Vec<PoolNode>) -> Vec<PoolNode> {
+        let path = self.device.data_dir.join("node-info.json");
+        let mut known: HashMap<String, NodeInfo> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        for n in &mut nodes {
+            match &n.info {
+                Some(i) if n.reachable => {
+                    known.insert(n.id.clone(), i.clone());
+                }
+                _ => n.info = known.get(&n.id).cloned(),
+            }
+        }
+        if let Ok(b) = serde_json::to_vec(&known) {
+            let _ = std::fs::write(&path, b);
+        }
+        nodes
     }
 
     /// Reachable nodes that accept this account's data, one per failure domain (a person).
@@ -587,7 +610,7 @@ impl Session {
         let mut out = Vec::new();
         let mut domains: Vec<String> = Vec::new();
         for p in self.pool().await {
-            let Some(info) = &p.info else { continue };
+            let Some(info) = p.info.as_ref().filter(|_| p.reachable) else { continue };
             if info.role == Role::None || domains.contains(&p.owner) {
                 continue;
             }

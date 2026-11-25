@@ -604,6 +604,36 @@ objects rebuilt onto her replacement node, 0 lost. What the runs taught:
   is dead, and the dead node stays in the pool until someone removes it. Repair should offer to
   drop a node that holds nothing it can serve.
 
+### Protection you choose, and switching it (2026-11-25)
+
+**The choice.** The account head carries an optional `protection` (k-of-n). Unset, the code is
+picked from the pool's size as before (3-of-5 with five people). Set, new chunks use it whenever
+enough domains are reachable; manifests, indexes and thumbnails get whole copies, at least three
+and enough to survive as many nodes down as the chunks. If too few nodes are up, uploads fall
+back to the automatic code and the next re-code moves them.
+
+**What each choice lets you store** (`ursa_client::capacity`). Each domain holds at most `D/k`
+of `D` bytes of files. Friends' domains hold at most what each gives you; together at most what
+you give them (fair share, 1:1); pieces on your own node do not count towards it. The Pool page
+shows this limit for every preset (2 copies, 1.5×, 1.67×, 3 copies, and the wider codes a bigger
+pool unlocks), the hours a year a file would be out of reach at the pool's measured uptime, and
+recommends the cheapest choice that is readable 99.99% of the time.
+
+**Switching** (`Session::recode`). Re-codes every chunk, thumbnail and manifest not in the chosen
+code, commits the index every 16 files, and after each commit deletes the old pieces no live file
+references (counted across all manifests, so chunks shared by identical files survive). It runs
+in the app, not the page, and picks up again at the next start if the app closed mid-way. A
+switch the pool cannot take now (fewer reachable nodes than `n`) is refused and changes nothing.
+Pieces written by a switch cut short are not referenced and stay until leases exist.
+
+**Uptime.** Nodes record the spans they were running (`node/uptime.json`, a heartbeat a minute)
+and report the share of the last 30 days in `info`, with the disk's size and free space for
+owners. Clients remember each node's last answer, so a node that is down still shows its figures.
+
+`scripts/protection-test.py`: six local nodes; 3-of-5 → 2 copies → 4-of-6 → 3 copies → 2-of-4 →
+4-of-6 cut short and resumed → 3-of-5, every file byte-identical after each, the pool holding
+n/k of the files' bytes, reads with two nodes down at 4-of-6, and a refused switch.
+
 ### Phase 4: polish
 
 Everything that makes it feel finished: on-device search (dates, places, faces, CLIP-style
