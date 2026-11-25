@@ -83,7 +83,7 @@ pub fn layer<S>() -> impl Layer<S> + Send + Sync
 where
     S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
-    Otlp.with_filter(tracing_subscriber::filter::filter_fn(|m| exported(m)))
+    Otlp.with_filter(tracing_subscriber::filter::filter_fn(exported))
 }
 
 /// See [`layer`].
