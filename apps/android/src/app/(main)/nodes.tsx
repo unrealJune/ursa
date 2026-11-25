@@ -4,14 +4,13 @@ import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { errorText, type PoolNode, type RepairReport, Ursa, withProgress } from 'ursa-core';
 
-import { useUrsa } from '@/core/store';
+import { refreshStatus } from '@/core/session';
 import { bytes, shortId } from '@/format';
 import { useTheme } from '@/theme';
 import { Button, Divider, Group, Icon, ListRow, Notice, Progress, SectionHeader, Txt } from '@/ui/kit';
 
 /** The pool: this account's nodes and its friends', checked now, plus repair. */
 export default function Nodes() {
-  const { refreshStatus } = useUrsa();
   const { c } = useTheme();
   const insets = useSafeAreaInsets();
   const [pool, setPool] = useState<PoolNode[] | null>(null);

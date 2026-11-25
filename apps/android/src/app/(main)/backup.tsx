@@ -1,12 +1,15 @@
 import { View } from 'react-native';
 
 import { pickAndUpload, pickFiles } from '@/core/pick';
-import { useUrsa } from '@/core/store';
+import { setPrefs, useSession } from '@/core/session';
+import { backupNow, useUploads } from '@/core/uploads';
 import { useTheme } from '@/theme';
 import { Button, Divider, Group, ListRow, Notice, Page, Progress, SectionHeader, Switch, Txt } from '@/ui/kit';
 
 export default function Backup() {
-  const { prefs, setPrefs, uploads, backupScanning, backupNow, enqueue } = useUrsa();
+  const prefs = useSession((s) => s.prefs);
+  const uploads = useUploads((u) => u);
+  const backupScanning = uploads.scanning;
   const { c } = useTheme();
   const cur = uploads.current;
 
@@ -46,13 +49,13 @@ export default function Backup() {
         <Divider inset={56} />
         <ListRow icon="videocam" title="Include videos" subtitle="Videos use far more space in the pool" trailing={<Switch value={prefs.backupVideos} onChange={(v) => setPrefs({ backupVideos: v })} />} />
       </Group>
-      {prefs.backup ? <Button label="Back up now" kind="tonal" icon="sync" busy={backupScanning} onPress={backupNow} style={{ alignSelf: 'flex-start', marginHorizontal: 16, marginTop: 16 }} /> : null}
+      {prefs.backup ? <Button label="Back up now" kind="tonal" icon="sync" busy={backupScanning} onPress={() => backupNow()} style={{ alignSelf: 'flex-start', marginHorizontal: 16, marginTop: 16 }} /> : null}
 
       <SectionHeader>Upload by hand</SectionHeader>
       <Group>
-        <ListRow icon="add-photo-alternate" title="Photos and videos" onPress={() => pickAndUpload(enqueue)} />
+        <ListRow icon="add-photo-alternate" title="Photos and videos" onPress={pickAndUpload} />
         <Divider inset={56} />
-        <ListRow icon="upload-file" title="Files" onPress={() => pickFiles(enqueue)} />
+        <ListRow icon="upload-file" title="Files" onPress={pickFiles} />
       </Group>
     </Page>
   );

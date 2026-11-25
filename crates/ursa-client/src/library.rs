@@ -16,6 +16,7 @@ use ursa_core::head::{IndexEntry, LibraryIndex};
 use ursa_core::manifest::{self, ChunkRef, FileManifest, ShardSet, StoredRef};
 
 use crate::objects::code_for;
+use crate::stats::{Stage, Stats, mb, rate};
 use crate::{Session, now_ms};
 
 /// Chunks in flight per upload or download.
@@ -81,27 +82,125 @@ pub struct RepairReport {
     pub unrecoverable: Vec<String>,
 }
 
+/// An uploaded file whose index entry is waiting for the next index change.
+#[derive(Clone, Debug)]
+pub(crate) struct Staged {
+    id: ObjectId,
+    added_ms: i64,
+    at: ShardSet,
+}
+
+impl Staged {
+    fn apply(&self, idx: &mut LibraryIndex) {
+        idx.add(self.id, self.added_ms, Some(self.at.clone()));
+    }
+}
+
 impl Session {
     // -----------------------------------------------------------------------------------------
     // The index
 
-    pub(crate) async fn index(&self) -> Result<LibraryIndex> {
+    /// The index as stored, without the uploads still waiting to be written.
+    async fn stored_index(&self) -> Result<LibraryIndex> {
         let Some(r) = self.state().await.index else { return Ok(LibraryIndex::default()) };
         let sealed = self.cached_or_fetch(&r.id, &r.shards).await?;
         LibraryIndex::open(&self.account, &r.id, &sealed).map_err(|e| anyhow!("library index: {e}"))
     }
 
+    /// The index as this device sees it: the stored one plus the uploads not written yet, so a
+    /// staged file lists, shows its thumbnail and downloads like any other.
+    pub(crate) async fn index(&self) -> Result<LibraryIndex> {
+        let mut idx = self.stored_index().await?;
+        for s in self.pending_uploads() {
+            s.apply(&mut idx);
+        }
+        Ok(idx)
+    }
+
+    fn pending_uploads(&self) -> Vec<Staged> {
+        self.pending.lock().expect("pending uploads").clone()
+    }
+
+    /// How many uploads are stored but not yet in the index.
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().expect("pending uploads").len()
+    }
+
+    /// Writes every staged upload into the index in one change. Returns how many it wrote.
+    pub async fn commit_uploads(&self) -> Result<usize> {
+        let n = self.pending_count();
+        if n == 0 {
+            return Ok(0);
+        }
+        // change_index writes everything pending along with its own change, here none.
+        self.change_index(|_| {}).await?;
+        info!(files = n, "uploads committed");
+        Ok(n)
+    }
+
     /// Applies `change` to the index and saves it, merging with concurrent changes: if the head
     /// moved under us, the change is re-applied to the newer index.
+    ///
+    /// Every staged upload is written with it: a change is one index upload and one head save
+    /// whatever it carries, so this is where uploads are batched.
     async fn change_index(&self, change: impl Fn(&mut LibraryIndex)) -> Result<()> {
+        let started = std::time::Instant::now();
+        let staged = self.pending_count();
+        let (stats, r) = Stats::default().scope(self.change_index_inner(change)).await;
+        let paths = self.paths_now().await;
+        let path = |id: &str| paths.get(id).cloned().unwrap_or_else(|| "-".into());
+        match &r {
+            Ok(index_bytes) => info!(
+                staged,
+                index = %mb(*index_bytes as u64),
+                ms = started.elapsed().as_millis() as u64,
+                stages = %stats.stages(),
+                nodes = %stats.nodes(path),
+                "library change written"
+            ),
+            Err(e) => warn!(
+                staged,
+                ms = started.elapsed().as_millis() as u64,
+                stages = %stats.stages(),
+                nodes = %stats.nodes(path),
+                "library change failed: {e:#}"
+            ),
+        }
+        r.map(|_| ())
+    }
+
+    /// Returns the sealed index's size.
+    async fn change_index_inner(&self, change: impl Fn(&mut LibraryIndex)) -> Result<usize> {
+        let _queued = {
+            let _t = Stage::start("queue");
+            self.index_lock.lock().await
+        };
+        // Staged from here on are left for the next change; these are written by this one.
+        let staged = self.pending_uploads();
         for _ in 0..5 {
             let before = self.state().await.index.as_ref().map(|r| r.id);
-            let mut idx = self.index().await?;
+            let mut idx = {
+                let _t = Stage::start("read");
+                self.stored_index().await?
+            };
+            for s in &staged {
+                s.apply(&mut idx);
+            }
             change(&mut idx);
-            let (id, sealed) = idx.seal(&self.account);
-            let writable = self.writable().await;
-            let set = self.store_object(&sealed, code_for(writable.len(), false)?, &writable, rand_usize()).await?;
+            let (id, sealed) = {
+                let _t = Stage::start("seal");
+                idx.seal(&self.account)
+            };
+            let writable = {
+                let _t = Stage::start("pool");
+                self.writable().await
+            };
+            let set = {
+                let _t = Stage::start("store");
+                self.store_object(&sealed, code_for(writable.len(), false)?, &writable, rand_usize()).await?
+            };
             let new = StoredRef { id, shards: set };
+            let _head = Stage::start("head");
             let state = self
                 .update(move |s| {
                     // Only replace the index we started from; otherwise update() loaded a newer
@@ -112,7 +211,11 @@ impl Session {
                 })
                 .await?;
             if state.index.as_ref().map(|r| r.id) == Some(id) {
-                return Ok(());
+                if !staged.is_empty() {
+                    let written: std::collections::HashSet<ObjectId> = staged.iter().map(|s| s.id).collect();
+                    self.pending.lock().expect("pending uploads").retain(|s| !written.contains(&s.id));
+                }
+                return Ok(sealed.len());
             }
         }
         bail!("the library kept changing; try again")
@@ -168,8 +271,51 @@ impl Session {
         Ok(items)
     }
 
+    /// Uploads a file and writes it into the library index.
     pub async fn upload(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
-        let writable = self.writable().await;
+        let item = self.upload_staged(meta, progress).await?;
+        self.commit_uploads().await?;
+        Ok(item)
+    }
+
+    /// Uploads a file (its chunks, thumbnail and manifest) and stages its index entry instead
+    /// of writing it: `commit_uploads` writes every staged entry in one index change. Writing the
+    /// index once per file re-uploaded the whole index per photo during a backup, which grows with
+    /// the library and left every replaced copy on the nodes. A staged file is lost from the
+    /// library (its objects orphaned) if the process ends before a commit, so the caller only
+    /// counts a file as kept once a commit after it has succeeded.
+    pub async fn upload_staged(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
+        let started = std::time::Instant::now();
+        let bytes = tokio::fs::metadata(&meta.path).await.map(|m| m.len()).unwrap_or(0);
+        let (stats, r) = Stats::default().scope(self.upload_staged_inner(meta, progress)).await;
+        let took = started.elapsed();
+        let paths = self.paths_now().await;
+        let path = |id: &str| paths.get(id).cloned().unwrap_or_else(|| "-".into());
+        match &r {
+            Ok(_) => info!(
+                size = %mb(bytes),
+                ms = took.as_millis() as u64,
+                rate = %rate(bytes, took),
+                stages = %stats.stages(),
+                nodes = %stats.nodes(path),
+                "upload done"
+            ),
+            Err(e) => warn!(
+                size = %mb(bytes),
+                ms = took.as_millis() as u64,
+                stages = %stats.stages(),
+                nodes = %stats.nodes(path),
+                "upload failed: {e:#}"
+            ),
+        }
+        r
+    }
+
+    async fn upload_staged_inner(&self, meta: UploadMeta, progress: impl Fn(u64, u64)) -> Result<Item> {
+        let writable = {
+            let _t = Stage::start("pool");
+            self.writable().await
+        };
         let big = code_for(writable.len(), true)?;
         let small = code_for(writable.len(), false)?;
         let fmeta = tokio::fs::metadata(&meta.path).await.with_context(|| format!("read {}", meta.path.display()))?;
@@ -187,19 +333,27 @@ impl Session {
         let (tx, mut rx) = tokio::sync::mpsc::channel(IN_FLIGHT);
         let account = self.account.clone();
         let path = meta.path.clone();
-        let reader = tokio::task::spawn_blocking(move || -> Result<()> {
+        // Returns the time spent reading and sealing (not waiting for the network to take more).
+        let reader = tokio::task::spawn_blocking(move || -> Result<std::time::Duration> {
             let f = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(&path)?);
-            for piece in chunk::chunks(f) {
-                if tx.blocking_send(seal_chunk(account.root(), &piece?)).is_err() {
+            let mut sealing = std::time::Duration::ZERO;
+            let mut pieces = chunk::chunks(f);
+            loop {
+                let t = std::time::Instant::now();
+                let Some(piece) = pieces.next() else { break };
+                let sealed = seal_chunk(account.root(), &piece?);
+                sealing += t.elapsed();
+                if tx.blocking_send(sealed).is_err() {
                     break;
                 }
             }
-            Ok(())
+            Ok(sealing)
         });
         let rotate = rand_usize();
         let mut done = 0u64;
         progress(0, total);
         let mut chunks = Vec::new();
+        let placing = Stage::start("place");
         let mut uploads = stream::poll_fn(move |cx| rx.poll_recv(cx))
             .enumerate()
             .map(|(i, s)| {
@@ -217,8 +371,10 @@ impl Session {
             chunks.push(c);
         }
         drop(uploads);
-        reader.await??;
+        drop(placing);
+        Stats::stage("read+seal", reader.await??);
 
+        let thumb_stage = Stage::start("thumb");
         let thumb = match &meta.thumb_path {
             Some(p) => {
                 let bytes = tokio::fs::read(p).await.with_context(|| format!("read thumbnail {}", p.display()))?;
@@ -229,6 +385,8 @@ impl Session {
             }
             None => None,
         };
+        drop(thumb_stage);
+        let _manifest = Stage::start("manifest");
         let m = FileManifest {
             v: manifest::VERSION,
             name,
@@ -244,8 +402,7 @@ impl Session {
         };
         let (id, sealed) = manifest::seal(self.account.root(), &m);
         let at = self.store_object(&sealed, small, &writable, rotate).await?;
-        let added = m.added_ms;
-        self.change_index(move |idx| idx.add(id, added, Some(at.clone()))).await?;
+        self.pending.lock().expect("pending uploads").push(Staged { id, added_ms: m.added_ms, at });
         progress(total, total);
         Ok(Item::of(&id, &m))
     }
@@ -270,7 +427,39 @@ impl Session {
     }
 
     pub async fn download(&self, file_id: &str, out_path: &Path, progress: impl Fn(u64, u64)) -> Result<()> {
-        let (_, _, m) = self.entry(file_id).await?;
+        let started = std::time::Instant::now();
+        let (stats, r) = Stats::default().scope(self.download_inner(file_id, out_path, progress)).await;
+        let took = started.elapsed();
+        let paths = self.paths_now().await;
+        let path = |id: &str| paths.get(id).cloned().unwrap_or_else(|| "-".into());
+        match &r {
+            Ok(bytes) => info!(
+                size = %mb(*bytes),
+                ms = took.as_millis() as u64,
+                rate = %rate(*bytes, took),
+                stages = %stats.stages(),
+                hedges = stats.hedges(),
+                decoded = stats.decodes(),
+                nodes = %stats.nodes(path),
+                "download done"
+            ),
+            Err(e) => warn!(
+                ms = took.as_millis() as u64,
+                stages = %stats.stages(),
+                hedges = stats.hedges(),
+                nodes = %stats.nodes(path),
+                "download failed: {e:#}"
+            ),
+        }
+        r.map(|_| ())
+    }
+
+    /// Returns the file's size.
+    async fn download_inner(&self, file_id: &str, out_path: &Path, progress: impl Fn(u64, u64)) -> Result<u64> {
+        let (_, _, m) = {
+            let _t = Stage::start("manifest");
+            self.entry(file_id).await?
+        };
         let tmp = out_path.with_file_name(format!(
             "{}.ursa-part",
             out_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
@@ -279,6 +468,7 @@ impl Session {
         let total = m.size;
         let mut done = 0u64;
         progress(0, total);
+        let fetching = Stage::start("fetch");
         let result: Result<()> = async {
             let mut pieces = stream::iter(m.chunks.clone())
                 .map(|c| async move {
@@ -297,6 +487,7 @@ impl Session {
             Ok(())
         }
         .await;
+        drop(fetching);
         drop(file);
         if let Err(e) = result {
             let _ = tokio::fs::remove_file(&tmp).await;
@@ -308,13 +499,30 @@ impl Session {
         }
         let _ = tokio::fs::remove_file(out_path).await;
         tokio::fs::rename(&tmp, out_path).await?;
-        Ok(())
+        Ok(total)
     }
 
     /// Removes a file from the library. Its shards stay until compaction exists.
     pub async fn delete(&self, file_id: &str) -> Result<()> {
-        let id: ObjectId = file_id.parse().map_err(|e| anyhow!("{e}"))?;
-        self.change_index(move |idx| idx.delete(id)).await
+        self.delete_many(&[file_id]).await
+    }
+
+    /// Removes several files in one index change: one index upload and one head save however
+    /// many there are, where deleting them one by one wrote the whole index once per file.
+    pub async fn delete_many(&self, file_ids: &[&str]) -> Result<()> {
+        let ids = file_ids
+            .iter()
+            .map(|f| f.parse::<ObjectId>().map_err(|e| anyhow!("{f}: {e}")))
+            .collect::<Result<Vec<_>>>()?;
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.change_index(move |idx| {
+            for id in &ids {
+                idx.delete(*id);
+            }
+        })
+        .await
     }
 
     /// Checks every object of every file, rebuilds missing shards onto live nodes, rewrites the

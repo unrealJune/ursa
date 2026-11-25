@@ -1,19 +1,22 @@
 import { router } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useUrsa } from '@/core/store';
+import { signOut, start, useSession } from '@/core/session';
 import { useTheme } from '@/theme';
 import { Button, Icon, Txt } from '@/ui/kit';
 
-/** The core could not start, or this phone's account could not be reached. */
+/** The core could not start, or this phone's account could not be reached (it keeps trying). */
 export default function Problem() {
-  const { phase, problem, retry, signOut } = useUrsa();
+  const phase = useSession((s) => s.phase);
+  const problem = useSession((s) => s.problem);
+  const retryAt = useSession((s) => s.retryAt);
   const { c } = useTheme();
   const insets = useSafeAreaInsets();
   const [busy, setBusy] = useState(false);
   const offline = phase === 'offline';
+  const wait = useCountdown(retryAt);
 
   return (
     <View style={{ flex: 1, backgroundColor: c.surface, paddingTop: insets.top + 64, paddingBottom: insets.bottom + 24, paddingHorizontal: 24 }}>
@@ -25,6 +28,11 @@ export default function Problem() {
             ? 'This phone still holds your account, but none of your nodes answered. Check your connection, or the relays and token under Network.'
             : 'The network could not start. A relay address may be wrong.'}
         </Txt>
+        {offline ? (
+          <Txt role="labelLarge" color={c.primary}>
+            {busy || retryAt === null ? 'Trying again…' : `Trying again in ${wait} s`}
+          </Txt>
+        ) : null}
         {problem ? (
           <Txt role="bodySmall" color={c.onSurfaceVariant} selectable>
             {problem}
@@ -33,12 +41,12 @@ export default function Problem() {
       </View>
       <View style={{ gap: 12 }}>
         <Button
-          label="Try again"
+          label="Try again now"
           icon="refresh"
           busy={busy}
           onPress={async () => {
             setBusy(true);
-            await retry();
+            await start();
             setBusy(false);
           }}
         />
@@ -62,4 +70,15 @@ export default function Problem() {
       </View>
     </View>
   );
+}
+
+/** Whole seconds until `at`, ticking. */
+function useCountdown(at: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (at === null) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [at]);
+  return at === null ? 0 : Math.max(0, Math.ceil((at - now) / 1000));
 }

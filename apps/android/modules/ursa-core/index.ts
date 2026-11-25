@@ -37,6 +37,8 @@ export type LibraryItem = {
   width: number | null;
   height: number | null;
   hasThumb: boolean;
+  /** After an upload: how long the phone took to copy the file out and draw its thumbnail. */
+  prepareMs?: number;
 };
 
 export type PoolNode = {
@@ -96,11 +98,17 @@ declare class UrsaCoreModule extends NativeModule<Events> {
   list(): Promise<LibraryItem[]>;
   thumb(fileId: string): Promise<string>;
   upload(uri: string, meta: UploadMeta, task: string): Promise<LibraryItem>;
+  /** Uploads without writing the library entry yet; `commitUploads` writes a batch at once. */
+  uploadStaged(uri: string, meta: UploadMeta, task: string): Promise<LibraryItem>;
+  /** Writes every staged upload into the library in one change. Resolves with how many. */
+  commitUploads(): Promise<number>;
   download(fileId: string, name: string, task: string): Promise<string>;
   saveToDevice(fileUri: string, name: string, mime: string): Promise<string>;
   /** Opens a downloaded file in the app that handles its type. */
   open(fileUri: string, mime: string): void;
   delete(fileId: string): Promise<void>;
+  /** Several files in one library change (one index upload, one head save). */
+  deleteMany(fileIds: string[]): Promise<void>;
   repair(task: string): Promise<RepairReport>;
   signOut(): Promise<void>;
 }

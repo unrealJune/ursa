@@ -133,6 +133,21 @@ pub struct UploadRequest {
     pub thumb_path: Option<String>,
 }
 
+impl From<UploadRequest> for UploadMeta {
+    fn from(r: UploadRequest) -> Self {
+        UploadMeta {
+            path: r.path.into(),
+            name: r.name,
+            mime: r.mime,
+            created_ms: r.created_ms,
+            modified_ms: r.modified_ms,
+            width: r.width,
+            height: r.height,
+            thumb_path: r.thumb_path.map(Into::into),
+        }
+    }
+}
+
 #[derive(uniffi::Record)]
 pub struct PoolNode {
     pub id: String,
@@ -195,14 +210,49 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// Runs `f` on the core's runtime and waits for it from whatever executor called.
-async fn on_rt<T: Send + 'static>(
+/// Runs a call on the core's runtime. A call that fails is logged here, on its way to the app,
+/// with the line of the call (each exported method makes one), so it reaches the device log and
+/// telemetry: before, an error went straight back to the app and the core kept no trace of it,
+/// so a failure the app showed only on screen (a bulk delete's "the account head kept
+/// changing") could not be found afterwards.
+#[track_caller]
+fn on_rt<T: Send + 'static>(
     f: impl Future<Output = anyhow::Result<T>> + Send + 'static,
+) -> impl Future<Output = Res<T>> {
+    let at = std::panic::Location::caller();
+    run_logged(f, at, true)
+}
+
+/// [`on_rt`] for calls whose input is a secret (recovery words, a key file or its passphrase,
+/// the account root, a link or claim code): a failure is logged without its message, which may
+/// quote the input it could not parse. Telemetry never carries keys.
+#[track_caller]
+fn on_rt_secret<T: Send + 'static>(
+    f: impl Future<Output = anyhow::Result<T>> + Send + 'static,
+) -> impl Future<Output = Res<T>> {
+    let at = std::panic::Location::caller();
+    run_logged(f, at, false)
+}
+
+async fn run_logged<T: Send + 'static>(
+    f: impl Future<Output = anyhow::Result<T>> + Send + 'static,
+    at: &'static std::panic::Location<'static>,
+    with_message: bool,
 ) -> Res<T> {
-    runtime()
+    let r = runtime()
         .spawn(f)
         .await
-        .map_err(|e| anyhow!("the core stopped mid-call: {e}"))?
-        .map_err(Into::into)
+        .map_err(|e| anyhow!("the core stopped mid-call: {e}"))
+        .and_then(|r| r);
+    if let Err(e) = &r {
+        let call = format!("{}:{}", at.file(), at.line());
+        if with_message {
+            tracing::warn!(call = %call, "call failed: {e:#}");
+        } else {
+            tracing::warn!(call = %call, "call failed (message withheld: the input is secret)");
+        }
+    }
+    r.map_err(Into::into)
 }
 
 fn init_logging() {
@@ -371,7 +421,7 @@ impl UrsaCore {
         platform: String,
     ) -> Res<Status> {
         let inner = self.inner.clone();
-        on_rt(async move {
+        on_rt_secret(async move {
             // Not `match inner.device.lock().await.clone()`: a scrutinee's temporaries live to
             // the end of the match, so the guard would still be held when `None` stores the
             // device, and the second lock would wait on the first forever.
@@ -465,7 +515,7 @@ impl UrsaCore {
     /// Recovers an account from its 24 words. The account is found through its locator record.
     pub async fn recover_phrase(&self, phrase: String) -> Res<AccountKeys> {
         let inner = self.inner.clone();
-        on_rt(async move {
+        on_rt_secret(async move {
             let root = root_from_phrase(&phrase).map_err(|e| anyhow!("{e}"))?;
             open_root(&inner, Account::from_root(root)).await
         })
@@ -475,7 +525,7 @@ impl UrsaCore {
     /// Recovers an account from a key file (its JSON) and the passphrase it was saved with.
     pub async fn recover_key_file(&self, key_file: String, passphrase: String) -> Res<AccountKeys> {
         let inner = self.inner.clone();
-        on_rt(async move {
+        on_rt_secret(async move {
             let account = KeyFile::from_json(&key_file)
                 .and_then(|kf| kf.open(&passphrase))
                 .map_err(|e| anyhow!("{e}"))?;
@@ -491,7 +541,7 @@ impl UrsaCore {
         listener: Arc<dyn JoinListener>,
     ) -> Res<AccountKeys> {
         let inner = self.inner.clone();
-        on_rt(async move {
+        on_rt_secret(async move {
             let (dn, pf) = inner.names.lock().await.clone();
             let device = inner.device().await?;
             let linked = device
@@ -595,7 +645,7 @@ impl UrsaCore {
     /// Claims a node with its `ursa-claim:` link; returns its id.
     pub async fn claim_node(&self, link: String, label: String) -> Res<String> {
         let inner = self.inner.clone();
-        on_rt(async move {
+        on_rt_secret(async move {
             Ok(inner
                 .session()
                 .await?
@@ -637,13 +687,13 @@ impl UrsaCore {
 
     pub async fn recovery_phrase(&self) -> Res<String> {
         let inner = self.inner.clone();
-        on_rt(async move { Ok(recovery_phrase(inner.session().await?.account.root())) }).await
+        on_rt_secret(async move { Ok(recovery_phrase(inner.session().await?.account.root())) }).await
     }
 
     /// The account root sealed under a passphrase, as key-file JSON.
     pub async fn key_file(&self, passphrase: String) -> Res<String> {
         let inner = self.inner.clone();
-        on_rt(async move {
+        on_rt_secret(async move {
             if passphrase.chars().count() < 8 {
                 bail!("use a passphrase of at least 8 characters");
             }
@@ -670,6 +720,7 @@ impl UrsaCore {
         .await
     }
 
+    /// Uploads a file and writes it into the library at once.
     pub async fn upload(
         &self,
         request: UploadRequest,
@@ -677,24 +728,40 @@ impl UrsaCore {
     ) -> Res<LibraryItem> {
         let inner = self.inner.clone();
         on_rt(async move {
-            let meta = UploadMeta {
-                path: request.path.into(),
-                name: request.name,
-                mime: request.mime,
-                created_ms: request.created_ms,
-                modified_ms: request.modified_ms,
-                width: request.width,
-                height: request.height,
-                thumb_path: request.thumb_path.map(Into::into),
-            };
             Ok(inner
                 .session()
                 .await?
-                .upload(meta, throttled(listener))
+                .upload(request.into(), throttled(listener))
                 .await?
                 .into())
         })
         .await
+    }
+
+    /// Uploads a file and leaves its library entry for `commit_uploads`, which writes any number
+    /// in one index change. The file lists like any other meanwhile; it is only kept for good
+    /// once a commit after it succeeds (a process that ends first loses it from the library).
+    pub async fn upload_staged(
+        &self,
+        request: UploadRequest,
+        listener: Arc<dyn ProgressListener>,
+    ) -> Res<LibraryItem> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            Ok(inner
+                .session()
+                .await?
+                .upload_staged(request.into(), throttled(listener))
+                .await?
+                .into())
+        })
+        .await
+    }
+
+    /// Writes every staged upload into the library in one change. Returns how many it wrote.
+    pub async fn commit_uploads(&self) -> Res<u32> {
+        let inner = self.inner.clone();
+        on_rt(async move { Ok(inner.session().await?.commit_uploads().await? as u32) }).await
     }
 
     /// The decrypted thumbnail's path, cached on this device.
@@ -732,6 +799,16 @@ impl UrsaCore {
     pub async fn delete(&self, file_id: String) -> Res<()> {
         let inner = self.inner.clone();
         on_rt(async move { inner.session().await?.delete(&file_id).await }).await
+    }
+
+    /// Deletes several files in one library change (one index upload, one head save).
+    pub async fn delete_many(&self, file_ids: Vec<String>) -> Res<()> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            let ids: Vec<&str> = file_ids.iter().map(String::as_str).collect();
+            inner.session().await?.delete_many(&ids).await
+        })
+        .await
     }
 
     pub async fn repair(&self, listener: Arc<dyn ProgressListener>) -> Res<RepairReport> {

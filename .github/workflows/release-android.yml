@@ -6,13 +6,26 @@ name: Release / Android app
 # something (scripts/next-version.sh android) and attaches the APK to that GitHub release. Other
 # builds keep the APK as a workflow artifact.
 #
+# Caches: GitHub lets a run read caches saved on its own ref, its base branch or the default
+# branch. Two kinds of saving, then:
+# - Warming: every push to main or android-app builds and saves, so a new pull request's first
+#   build starts from its base branch instead of from nothing.
+# - Iteration: pull requests save too. Those entries are readable by that pull request alone, and
+#   its next push restores them first (a restore looks in the run's own ref before the base), so
+#   only what changed since its last push is rebuilt. cache-cleanup.yml deletes them when the pull
+#   request closes, so they do not sit in the repository's 10 GB evicting the shared entries.
+# The Rust target, ccache and Gradle keys leave the ABIs out: a release (arm64-v8a and x86_64)
+# fills a superset of what an arm64-only pull-request build reads.
+#
 # Signing: with the ANDROID_KEYSTORE_B64 secret (plus ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS
 # and ANDROID_KEY_PASSWORD) the APK is signed with that key; without it, with the Expo template's
 # debug key. Android only installs an update signed by the same key as the installed app.
 
 on:
   push:
-    branches: [main]
+    # main releases; android-app (where the app lives until it merges) only warms the caches its
+    # pull requests read.
+    branches: [main, android-app]
     paths:
       - apps/android/**
       - crates/**
@@ -82,9 +95,10 @@ jobs:
       # Developer telemetry: the JS layer and the Rust core send their logs as OTLP to the
       # collector this repository variable names (src/core/telemetry.ts). Unset sends nothing.
       EXPO_PUBLIC_OTEL_ENDPOINT: ${{ vars.OTEL_ENDPOINT }}
-      # A pull-request build only has to install on a test phone, and those are arm64; x86_64 is
-      # for emulators and doubled both the Rust and the C++ work. Releases ship both.
-      ABIS: ${{ github.event_name == 'pull_request' && 'arm64-v8a' || 'arm64-v8a x86_64' }}
+      # Anything but main builds for a test phone: arm64 only (x86_64 is for emulators and doubled
+      # both the Rust and the C++ work) and no R8. Releases ship both ABIs, shrunk.
+      FAST: ${{ github.ref != 'refs/heads/main' }}
+      ABIS: ${{ github.ref != 'refs/heads/main' && 'arm64-v8a' || 'arm64-v8a x86_64' }}
       # Gradle reuses task outputs across runs only with its build cache on (setup-gradle saves
       # ~/.gradle/caches/build-cache-1 with the rest of Gradle's home).
       GRADLE_OPTS: -Dorg.gradle.caching=true -Dorg.gradle.parallel=true -Dorg.gradle.jvmargs=-Xmx5g
@@ -127,7 +141,9 @@ jobs:
 
       # The built core: the library and its bindings, together (UniFFI aborts at load when the
       # two disagree, so neither is ever restored without the other). Keyed by everything the
-      # build reads, so a hit skips the Rust build entirely and a miss rebuilds from scratch.
+      # build reads, so a hit skips the Rust build entirely and a miss rebuilds from scratch. Exact
+      # keys only: an arm64-only build never takes a release's core or the other way round (Street
+      # Cryptid's previews failed repeatedly with that fallback, and never on a miss).
       - name: Restore the built core
         id: core
         uses: actions/cache/restore@v4
@@ -135,15 +151,20 @@ jobs:
           path: |
             apps/android/modules/ursa-core/android/src/main/jniLibs
             apps/android/modules/ursa-core/android/src/main/java/uniffi
-          key: ursa-core-${{ env.ABIS }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh') }}
+          key: ursa-core-${{ steps.rust.outputs.rustc }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh') }}-${{ env.ABIS }}
 
       - name: Rust targets
         if: steps.core.outputs.cache-hit != 'true'
         run: rustup target add aarch64-linux-android x86_64-linux-android
-      - uses: Swatinem/rust-cache@v2
+      - name: Restore the Cargo cache
+        id: cargo
+        uses: Swatinem/rust-cache@v2
         if: steps.core.outputs.cache-hit != 'true'
         with:
-          key: android-${{ env.ABIS }}
+          shared-key: android
+          # rust-cache's post step only saves after a success by default, so a build that died
+          # after compiling for twenty minutes left the next one just as cold.
+          cache-on-failure: 'true'
       - uses: taiki-e/install-action@v2
         if: steps.core.outputs.cache-hit != 'true'
         with:
@@ -166,12 +187,21 @@ jobs:
           key: ${{ steps.core.outputs.cache-primary-key }}
 
       - uses: oven-sh/setup-bun@v2
+      # Bun's download cache: without it every run fetched all ~780 packages again. Saved when the
+      # lockfile changes (an exact hit skips the save), restored from the newest one otherwise.
+      - name: Bun download cache
+        id: bun
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ursa-bun-${{ runner.os }}-${{ hashFiles('apps/android/bun.lock') }}
+          restore-keys: ursa-bun-${{ runner.os }}-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      # Pull requests save too (by default only the default branch does), so a pull request's
-      # second build finds its first one's task outputs.
+      # By default only the default branch saves. android-app must too (its pull requests read from
+      # it), and so do pull requests, so a pull request's next push finds this one's task outputs.
       - uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
@@ -198,15 +228,40 @@ jobs:
             echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
           } >> "$GITHUB_ENV"
       # A new entry every run (an exact hit never saves, so a fixed key would freeze), restored
-      # from the newest one: this pull request's last build, or main's.
-      - uses: actions/cache@v4
+      # from the newest one: this pull request's last build, else its base branch's or main's.
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
-          key: ursa-ccache-${{ env.ABIS }}-${{ hashFiles('apps/android/bun.lock') }}-${{ github.run_id }}
+          key: ursa-ccache-${{ hashFiles('apps/android/bun.lock') }}-${{ github.run_id }}
           restore-keys: |
-            ursa-ccache-${{ env.ABIS }}-${{ hashFiles('apps/android/bun.lock') }}-
-            ursa-ccache-${{ env.ABIS }}-
+            ursa-ccache-${{ hashFiles('apps/android/bun.lock') }}-
+            ursa-ccache-
       - run: ccache --zero-stats > /dev/null
+
+      # Metro's transform cache, for the JS bundle Gradle builds (createBundleReleaseJsAndAssets).
+      # Expo's Metro config has a build-runner mode: with both directories set it reads entries
+      # from RESTORE and writes every entry this bundle used, hits included, to OUTPUT, so the saved
+      # entry is exactly this build's working set and never grows. Metro keys each transform by
+      # file content and transformer config, so a stale entry is a miss, never a wrong transform.
+      # The second hash is the JS itself: a native-only push is an exact hit and saves nothing.
+      - name: Point Metro at its cache directories
+        run: |
+          mkdir -p "$RUNNER_TEMP/metro-cache" "$RUNNER_TEMP/metro-cache-output"
+          {
+            echo "EXPO_METRO_CACHE_RESTORE_DIR=$RUNNER_TEMP/metro-cache"
+            echo "EXPO_METRO_CACHE_OUTPUT_DIR=$RUNNER_TEMP/metro-cache-output"
+          } >> "$GITHUB_ENV"
+      - name: Restore the Metro cache
+        id: metro
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ursa-metro-${{ hashFiles('apps/android/bun.lock', 'apps/android/app.json', 'apps/android/app.config.ts', 'apps/android/babel.config.js', 'apps/android/metro.config.js') }}-${{ hashFiles('apps/android/src/**', 'apps/android/assets/**', 'apps/android/modules/*/index.ts') }}
+          restore-keys: |
+            ursa-metro-${{ hashFiles('apps/android/bun.lock', 'apps/android/app.json', 'apps/android/app.config.ts', 'apps/android/babel.config.js', 'apps/android/metro.config.js') }}-
+            ursa-metro-
 
       - name: Install and check the app
         working-directory: apps/android
@@ -240,12 +295,12 @@ jobs:
         run: |
           # Only the ABIs the core was built for.
           archs="$(tr ' ' ',' <<<"$ABIS")"
-          # R8 was 5 of a warm pull-request build's 9 minutes, and nothing caches it. A pull
-          # request's APK is for a test phone, so it skips R8 and resource shrinking; anything
-          # built for a release (main, or a dispatch) still runs both, so the keep rules are
-          # exercised before an APK ships.
+          # R8 was 5 of a warm pull-request build's 9 minutes, and nothing caches it. An APK built
+          # off main is for a test phone, so it skips R8 and resource shrinking; anything built on
+          # main (a release, or a dispatch) still runs both, so the keep rules are exercised
+          # before an APK ships.
           shrink=()
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+          if [[ "$FAST" == "true" ]]; then
             shrink=(-Pandroid.enableMinifyInReleaseBuilds=false -Pandroid.enableShrinkResourcesInReleaseBuilds=false)
           fi
           ./gradlew :app:assembleRelease --no-daemon --build-cache -PreactNativeArchitectures="$archs" "${shrink[@]}"
@@ -254,6 +309,59 @@ jobs:
       - name: ccache statistics
         if: '!cancelled()'
         run: ccache --show-stats || true
+      # Saved even after a failed build, so what it compiled still warms the next one.
+      - name: Save ccache
+        if: '!cancelled()'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+      # actions/cache folds the path into an entry's identity, so the output moves to the path the
+      # restore reads from before it is saved.
+      - name: Stage the Metro cache
+        if: ${{ !cancelled() && steps.metro.outputs.cache-hit != 'true' }}
+        run: |
+          out="$RUNNER_TEMP/metro-cache-output"
+          [[ -d "$out" && -n "$(ls -A "$out")" ]] || { echo "Metro wrote nothing to save."; exit 0; }
+          echo "Metro: restored $(find "$RUNNER_TEMP/metro-cache" -type f | wc -l) entries, this bundle used $(find "$out" -type f | wc -l)."
+          rm -rf -- "$RUNNER_TEMP/metro-cache"
+          mv -- "$out" "$RUNNER_TEMP/metro-cache"
+      - name: Save the Metro cache
+        if: ${{ !cancelled() && steps.metro.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ${{ steps.metro.outputs.cache-primary-key }}
+
+      # A build that took longer than it should is almost always one whose caches missed, so the
+      # summary says which did. "partial" is a restore from an older entry (a fallback key).
+      - name: Cache report
+        if: '!cancelled()'
+        env:
+          CORE: ${{ steps.core.outputs.cache-hit }}
+          CARGO: ${{ steps.core.outputs.cache-hit == 'true' && 'skipped (core cached)' || steps.cargo.outputs.cache-hit }}
+          BUN: ${{ steps.bun.outputs.cache-hit }}
+          METRO: ${{ steps.metro.outputs.cache-hit }}
+          METRO_MATCH: ${{ steps.metro.outputs.cache-matched-key }}
+          CCACHE_MATCH: ${{ steps.ccache.outputs.cache-matched-key }}
+        run: |
+          state() { if [[ "$1" == true ]]; then echo hit; elif [[ -n "$2" ]]; then echo partial; else echo miss; fi; }
+          {
+            echo "### Caches"
+            echo
+            echo "| Cache | Result |"
+            echo "| --- | --- |"
+            echo "| Built core (skips Rust) | $([[ "$CORE" == true ]] && echo hit || echo miss) |"
+            echo "| Cargo | ${CARGO:-miss} |"
+            echo "| Bun downloads | $([[ "$BUN" == true ]] && echo hit || echo "miss or older entry") |"
+            echo "| Metro transforms | $(state "$METRO" "$METRO_MATCH") |"
+            echo "| ccache | $([[ -n "$CCACHE_MATCH" ]] && echo "restored from ${CCACHE_MATCH##*-}" || echo miss) |"
+            echo
+            echo '```'
+            ccache --show-stats 2>/dev/null | grep -E 'Hits|Misses|Cacheable' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check the core shipped
         run: |

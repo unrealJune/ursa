@@ -4,14 +4,17 @@ import * as Clipboard from 'expo-clipboard';
 import { useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 
-import { useUrsa } from '@/core/store';
+import { useLibrary } from '@/core/library';
+import { setPrefs, signOut, useSession } from '@/core/session';
 import { telemetryEnabled, telemetryId } from '@/core/telemetry';
 import { shortId } from '@/format';
 import { useTheme } from '@/theme';
 import { Divider, Group, Icon, ListRow, Page, SectionHeader, Switch, TopBar, Txt } from '@/ui/kit';
 
 export default function Account() {
-  const { status, prefs, setPrefs, signOut, items } = useUrsa();
+  const status = useSession((s) => s.status);
+  const prefs = useSession((s) => s.prefs);
+  const count = useLibrary((s) => s.items.length);
   const { c } = useTheme();
   const [telemetry, setTelemetry] = useState<string | null>(null);
   useEffect(() => {
@@ -33,7 +36,7 @@ export default function Account() {
           </View>
           <Txt role="headlineSmall">{name}</Txt>
           <Txt role="bodySmall" color={c.onSurfaceVariant} selectable>
-            {status.accountId ? `Account ${shortId(status.accountId)} · ${items.length} files` : ''}
+            {status.accountId ? `Account ${shortId(status.accountId)} · ${count} files` : ''}
           </Txt>
         </View>
 
