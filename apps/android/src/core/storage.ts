@@ -154,7 +154,8 @@ export function onSwitchEnded(fn: () => void): () => void {
   return watch(switchStore, (s) => s.ended, () => fn());
 }
 
-async function recodeInBackground() {
+/** `quiet`: a resume at start, whose failures wait for the next start instead of showing. */
+async function recodeInBackground(quiet = false) {
   if (switchStore.get().switching) return;
   switchStore.set({ switching: true, progress: null, error: null });
   try {
@@ -162,9 +163,9 @@ async function recodeInBackground() {
       (task) => Ursa.recode(task),
       (done, total) => switchStore.set({ progress: total > 0 ? done / total : null }),
     );
-    if (r.failures.length) switchStore.set({ error: `${r.failures.length} file(s) could not be moved. Switch again when every node is up.` });
+    if (r.failures.length && !quiet) switchStore.set({ error: `${r.failures.length} file(s) could not be moved. Switch again when every node is up.` });
   } catch (e) {
-    switchStore.set({ error: errorText(e) });
+    if (!quiet) switchStore.set({ error: errorText(e) });
   } finally {
     switchStore.set({ switching: false, ended: switchStore.get().ended + 1 });
   }
@@ -188,7 +189,7 @@ export async function resumeStorage() {
   resumed = true;
   try {
     const r = await loadStorage();
-    if (r.pendingFiles > 0 || r.leftoverPieces > 0) await recodeInBackground();
+    if (r.chosen && (r.pendingFiles > 0 || r.leftoverPieces > 0)) await recodeInBackground(true);
     await Ursa.collectGarbage(null);
   } catch {
     resumed = false;

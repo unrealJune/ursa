@@ -301,7 +301,9 @@ impl Session {
             for c in &m.chunks {
                 if let Some(s) = &c.shards {
                     *codes.entry(code_name(s.code)).or_default() += 1;
-                    pending |= s.code != protection;
+                    // Only a chosen protection has files waiting to move: automatic follows the
+                    // pool, and files keep the code they were stored in until a switch is asked for.
+                    pending |= state.protection.is_some_and(|p| s.code != p);
                 }
             }
             pending_files += pending as usize;
@@ -357,6 +359,9 @@ impl Session {
         let stale = journal.entries.clone();
         let writable = self.writable().await;
         let state = self.state().await;
+        if writable.is_empty() {
+            bail!("no nodes are reachable now");
+        }
         let target = state.protection.unwrap_or_else(|| auto_code(writable.len()));
         if (target.n as usize) > writable.len() {
             bail!("{} needs {} nodes; {} are reachable now", code_name(target), target.n, writable.len());

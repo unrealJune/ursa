@@ -46,29 +46,6 @@ pub(crate) fn codes_for(protection: Option<Code>, domains: usize) -> Result<(Cod
     Ok((big, small))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn auto_is_three_of_five_with_five_people() {
-        assert_eq!(auto_code(5), Code { k: 3, n: 5 });
-        assert_eq!(auto_code(8), Code { k: 3, n: 5 });
-        assert_eq!(auto_code(2), Code { k: 1, n: 2 });
-    }
-
-    #[test]
-    fn a_choice_is_used_when_the_pool_can_take_it() {
-        let c = Code { k: 4, n: 6 };
-        assert_eq!(codes_for(Some(c), 6).unwrap(), (c, Code { k: 1, n: 3 }));
-        // Four copies of small objects survive the same three nodes down as 1-of-4 chunks.
-        assert_eq!(codes_for(Some(Code { k: 1, n: 4 }), 6).unwrap().1, Code { k: 1, n: 4 });
-        // Too few nodes up: the automatic code.
-        assert_eq!(codes_for(Some(c), 5).unwrap().0, Code { k: 3, n: 5 });
-        assert!(codes_for(None, 0).is_err());
-    }
-}
-
 impl Session {
     /// Codes `bytes` and puts shard `i` on `nodes[(rotate + i) % len]`, all in parallel. A node
     /// that refuses is replaced by the next unused one, if any.
@@ -251,5 +228,28 @@ impl Session {
             }
         }
         Ok(Some(out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_is_three_of_five_with_five_people() {
+        assert_eq!(auto_code(5), Code { k: 3, n: 5 });
+        assert_eq!(auto_code(8), Code { k: 3, n: 5 });
+        assert_eq!(auto_code(2), Code { k: 1, n: 2 });
+    }
+
+    #[test]
+    fn a_choice_is_used_when_the_pool_can_take_it() {
+        let c = Code { k: 4, n: 6 };
+        assert_eq!(codes_for(Some(c), 6).unwrap(), (c, Code { k: 1, n: 3 }));
+        // Four copies of small objects survive the same three nodes down as 1-of-4 chunks.
+        assert_eq!(codes_for(Some(Code { k: 1, n: 4 }), 6).unwrap().1, Code { k: 1, n: 4 });
+        // Too few nodes up: the automatic code.
+        assert_eq!(codes_for(Some(c), 5).unwrap().0, Code { k: 3, n: 5 });
+        assert!(codes_for(None, 0).is_err());
     }
 }

@@ -291,13 +291,14 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         try
         {
             var r = await StorageAsync();
-            if (r.PendingFiles > 0 || r.LeftoverPieces > 0) await RecodeInBackgroundAsync();
+            if (r.Chosen && (r.PendingFiles > 0 || r.LeftoverPieces > 0)) await RecodeInBackgroundAsync(quiet: true);
             await host.CallAsync("gc");
         }
         catch { /* nodes down: the next start tries again */ }
     }
 
-    private async Task RecodeInBackgroundAsync()
+    /// <param name="quiet">A resume at start, whose failures wait for the next start instead of showing.</param>
+    private async Task RecodeInBackgroundAsync(bool quiet = false)
     {
         if (IsSwitching) return;
         IsSwitching = true;
@@ -310,11 +311,11 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
                 if (p.Total > 0) SwitchPercent = 100.0 * p.Done / p.Total;
             }))).GetProperty("report");
             int failed = r.GetProperty("failures").GetArrayLength();
-            if (failed > 0) SwitchError = $"{failed} file(s) could not be moved. Switch again when every node is up.";
+            if (failed > 0 && !quiet) SwitchError = $"{failed} file(s) could not be moved. Switch again when every node is up.";
         }
         catch (Exception e)
         {
-            SwitchError = e.Message;
+            if (!quiet) SwitchError = e.Message;
         }
         finally
         {
