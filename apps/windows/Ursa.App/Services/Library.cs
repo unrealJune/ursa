@@ -490,14 +490,26 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         return path;
     }
 
-    public async Task DeleteAsync(IReadOnlyList<GalleryItem> items)
+    /// <summary>
+    /// Deletes <paramref name="items"/> from the library, then hands the ones that went to
+    /// <paramref name="remove"/> to take out of <see cref="Items"/> together, even if a later one fails.
+    /// </summary>
+    public async Task DeleteAsync(IReadOnlyList<GalleryItem> items, Action<IReadOnlyList<GalleryItem>> remove)
     {
-        foreach (var item in items)
+        var gone = new List<GalleryItem>();
+        try
         {
-            await host.CallAsync("delete", new { file_id = item.FileId });
-            Items.Remove(item);
-            foreach (var f in Directory.Exists(LocalStore.ViewCache) ? Directory.GetFiles(LocalStore.ViewCache, item.FileId + "*") : [])
-                TryDelete(f);
+            foreach (var item in items)
+            {
+                await host.CallAsync("delete", new { file_id = item.FileId });
+                gone.Add(item);
+                foreach (var f in Directory.Exists(LocalStore.ViewCache) ? Directory.GetFiles(LocalStore.ViewCache, item.FileId + "*") : [])
+                    TryDelete(f);
+            }
+        }
+        finally
+        {
+            if (gone.Count > 0) remove(gone);
         }
     }
 

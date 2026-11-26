@@ -240,7 +240,22 @@ public sealed partial class GalleryPage : Page
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
         if (viewing is not null && items.Contains(viewing)) CloseViewer();
-        await Guard(() => Library.DeleteAsync(items));
+        await Guard(() => Library.DeleteAsync(items, RemoveFromView));
+    }
+
+    /// <summary>
+    /// Takes deleted items out of the library with the view detached. Removed one by one, the
+    /// lined layout loses track of tiles after the first few (one left unplaced, then WinUI's
+    /// "Unspecified error"); reattached, it lays the rest out afresh.
+    /// </summary>
+    private void RemoveFromView(IReadOnlyList<GalleryItem> gone)
+    {
+        double offset = Gallery.ScrollView?.VerticalOffset ?? 0;
+        Gallery.ItemsSource = null;
+        foreach (var item in gone) Library.Items.Remove(item);
+        Gallery.ItemsSource = Library.Items;
+        Flow.InvalidateItemsInfo();
+        DispatcherQueue.TryEnqueue(() => Gallery.ScrollView?.ScrollTo(0, offset, new ScrollingScrollOptions(ScrollingAnimationMode.Disabled)));
     }
 
     private async void OnRefresh(object sender, RoutedEventArgs e) => await Guard(Library.RefreshAsync);
