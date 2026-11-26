@@ -37,9 +37,17 @@ public partial class App : Application
         string[] argv = Environment.GetCommandLineArgs();
         int at = Array.IndexOf(argv, "--upload");
         if (at < 0 || !Library.IsConnected) return;
-        var files = new List<Windows.Storage.StorageFile>();
-        foreach (string path in argv.Skip(at + 1).Where(File.Exists))
-            files.Add(await Windows.Storage.StorageFile.GetFileFromPathAsync(Path.GetFullPath(path)));
-        if (files.Count > 0) await Library.UploadAsync(files);
+        // Folders go up whole, as folders of the library.
+        var items = new List<Windows.Storage.IStorageItem>();
+        foreach (string path in argv.Skip(at + 1))
+        {
+            if (File.Exists(path)) items.Add(await Windows.Storage.StorageFile.GetFileFromPathAsync(Path.GetFullPath(path)));
+            else if (Directory.Exists(path)) items.Add(await Windows.Storage.StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(path)));
+        }
+        if (items.Count > 0)
+        {
+            try { await Library.UploadIntoAsync(items, null); }
+            catch (Exception e) { Library.Error = e.Message; }
+        }
     }
 }

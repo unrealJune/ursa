@@ -37,9 +37,29 @@ export type LibraryItem = {
   width: number | null;
   height: number | null;
   hasThumb: boolean;
+  /** The folder it is in; null at the top. */
+  dir: string | null;
+  /** Its folder's path, `/`-separated; empty at the top. */
+  path: string;
   /** After an upload: how long the phone took to copy the file out and draw its thumbnail. */
   prepareMs?: number;
 };
+
+/** A folder of the library. */
+export type FolderEntry = { id: string; parent: string | null; name: string; path: string };
+
+/** The library as folders: every folder and every file. */
+export type LibraryTree = { folders: FolderEntry[]; files: LibraryItem[] };
+
+/** One change to the tree (`ursa_client::Edit`). `null` for a folder means the top. */
+export type Edit =
+  | { op: 'create_folder'; id?: string; parent: string | null; name: string }
+  | { op: 'rename_folder'; id: string; name: string }
+  | { op: 'move_folder'; id: string; parent: string | null }
+  | { op: 'delete_folder'; id: string }
+  | { op: 'rename_file'; file_id: string; name: string }
+  | { op: 'move_file'; file_id: string; dir: string | null }
+  | { op: 'delete_file'; file_id: string };
 
 export type PoolNode = {
   id: string;
@@ -62,7 +82,16 @@ export type RecodeReport = { files: number; recodedFiles: number; objectsRecoded
 
 export type GcReport = { nodesSwept: number; nodesSkipped: number; deleted: number; bytesFreed: number; keptYoung: number };
 
-export type UploadMeta = { name?: string; mime?: string; createdMs?: number; modifiedMs?: number; width?: number; height?: number };
+export type UploadMeta = {
+  name?: string;
+  mime?: string;
+  createdMs?: number;
+  modifiedMs?: number;
+  width?: number;
+  height?: number;
+  /** The library folder to put it in; absent: the top. */
+  dir?: string;
+};
 
 type Events = {
   onProgress(e: { task: string; done: number; total: number }): void;
@@ -100,6 +129,10 @@ declare class UrsaCoreModule extends NativeModule<Events> {
   /** Writes the key file into the cache and returns its file:// URI, for the share sheet. */
   exportKeyFile(passphrase: string): Promise<string>;
   list(): Promise<LibraryItem[]>;
+  /** Every folder and every file, with each file's folder. */
+  tree(): Promise<LibraryTree>;
+  /** Changes the tree in one library change (a JSON array of `Edit`s). Resolves with the ids of folders it made. */
+  edit(editsJson: string): Promise<string[]>;
   thumb(fileId: string): Promise<string>;
   upload(uri: string, meta: UploadMeta, task: string): Promise<LibraryItem>;
   /** Uploads without writing the library entry yet; `commitUploads` writes a batch at once. */

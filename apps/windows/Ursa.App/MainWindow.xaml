@@ -46,6 +46,11 @@
                         <FontIcon Glyph="&#xE91B;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Content="Files" Tag="files">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8B7;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem Content="Pool" Tag="pool">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE968;" />

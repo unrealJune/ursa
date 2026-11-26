@@ -71,7 +71,22 @@ enum Command {
     RecoveryPhrase,
     KeyFile { passphrase: String },
     List,
+    /// Every folder and every file.
+    Tree,
+    /// Changes the tree in one library change; see `ursa_client::Edit`.
+    Edit { edits: Vec<ursa_client::Edit> },
     Upload(UploadMeta),
+    /// Uploads without writing the index; `commit_uploads` writes every staged file in one change.
+    UploadStaged(UploadMeta),
+    CommitUploads,
+    /// Uploads a folder from this computer and everything in it into `dir` (`None`: the root).
+    UploadFolder {
+        path: PathBuf,
+        #[serde(default)]
+        dir: Option<String>,
+    },
+    /// Downloads a library folder and everything in it into `out_dir`.
+    DownloadFolder { folder_id: String, out_dir: PathBuf },
     Thumb { file_id: String },
     Download { file_id: String, out_path: PathBuf },
     Delete { file_id: String },
@@ -352,11 +367,32 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
             Ok(json!({ "key_file": kf.to_json(), "account_id": s.account_id() }))
         }
         Command::List => Ok(json!({ "items": host.session().await?.list().await? })),
+        Command::Tree => Ok(serde_json::to_value(host.session().await?.tree().await?)?),
+        Command::Edit { edits } => Ok(json!({ "created": host.session().await?.edit(edits).await? })),
         Command::Upload(meta) => {
             let s = host.session().await?;
             let o = out.clone();
             let item = s.upload(meta, move |d, t| o.progress(d, t)).await?;
             Ok(json!({ "item": item }))
+        }
+        Command::UploadStaged(meta) => {
+            let s = host.session().await?;
+            let o = out.clone();
+            let item = s.upload_staged(meta, move |d, t| o.progress(d, t)).await?;
+            Ok(json!({ "item": item }))
+        }
+        Command::CommitUploads => Ok(json!({ "committed": host.session().await?.commit_uploads().await? })),
+        Command::UploadFolder { path, dir } => {
+            let s = host.session().await?;
+            let o = out.clone();
+            let (id, files) = s.upload_folder(&path, dir, move |d, t| o.progress(d, t)).await?;
+            Ok(json!({ "folder_id": id, "files": files }))
+        }
+        Command::DownloadFolder { folder_id, out_dir } => {
+            let s = host.session().await?;
+            let o = out.clone();
+            let path = s.download_folder(&folder_id, &out_dir, move |d, t| o.progress(d, t)).await?;
+            Ok(json!({ "path": path }))
         }
         Command::Thumb { file_id } => Ok(json!({ "path": host.session().await?.thumb(&file_id).await? })),
         Command::Download { file_id, out_path } => {

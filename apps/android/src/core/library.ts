@@ -1,4 +1,4 @@
-import { errorText, type LibraryItem, Ursa } from 'ursa-core';
+import { type Edit, errorText, type FolderEntry, type LibraryItem, Ursa } from 'ursa-core';
 
 import { saveFile } from './files';
 import { syncAccount } from './session';
@@ -11,6 +11,8 @@ export type Bulk = { label: string; done: number; failed: number; total: number 
 type LibraryState = {
   /** Every file, newest first. */
   items: LibraryItem[];
+  /** Every folder, as every device shows them. */
+  folders: FolderEntry[];
   /** The list has been read at least once since the account opened. */
   loaded: boolean;
   loading: boolean;
@@ -23,7 +25,7 @@ type LibraryState = {
   bulkError: string | null;
 };
 
-const EMPTY: LibraryState = { items: [], loaded: false, loading: false, pulling: false, error: null, bulk: null, bulkError: null };
+const EMPTY: LibraryState = { items: [], folders: [], loaded: false, loading: false, pulling: false, error: null, bulk: null, bulkError: null };
 
 export const library = createStore<LibraryState>(EMPTY);
 
@@ -83,9 +85,9 @@ async function readOnce(fromNodes: boolean) {
     }
   }
   try {
-    const items = await Ursa.list();
+    const { folders, files: items } = await Ursa.tree();
     items.sort(newestFirst);
-    library.set({ items, loaded: true, error });
+    library.set({ items, folders, loaded: true, error });
   } catch (e) {
     library.set({ error: errorText(e) });
     log('WARN', `library: ${errorText(e)}`);
@@ -192,4 +194,29 @@ export async function saveMany(items: LibraryItem[]): Promise<number> {
 
 export function clearBulkError() {
   library.set({ bulkError: null });
+}
+
+/** Changes the folder tree in one library change, then reads the library again. */
+export async function editTree(edits: Edit[]): Promise<void> {
+  if (edits.length === 0) return;
+  try {
+    await Ursa.edit(JSON.stringify(edits));
+  } finally {
+    await loadLibrary({ fromNodes: false });
+  }
+}
+
+/** The folder and every folder under it. */
+export function subtree(folders: FolderEntry[], id: string): Set<string> {
+  const out = new Set([id]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const f of folders) {
+      if (f.parent && out.has(f.parent) && !out.has(f.id)) {
+        out.add(f.id);
+        grew = true;
+      }
+    }
+  }
+  return out;
 }

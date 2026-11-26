@@ -66,6 +66,7 @@ class UrsaCoreModule : Module() {
           width = prepared.width?.toUInt(),
           height = prepared.height?.toUInt(),
           thumbPath = prepared.thumbPath,
+          dir = meta["dir"] as? String,
         )
       return call {
         val item = if (staged) core.uploadStaged(request, progress(task)) else core.upload(request, progress(task))
@@ -171,6 +172,20 @@ class UrsaCoreModule : Module() {
     }
 
     AsyncFunction("list") Coroutine { -> call { core.list().map { it.toMap() } } }
+
+    /** Every folder and every file, with each file's folder. */
+    AsyncFunction("tree") Coroutine { ->
+      call {
+        val t = core.tree()
+        mapOf(
+          "folders" to t.folders.map { mapOf("id" to it.id, "parent" to it.parent, "name" to it.name, "path" to it.path) },
+          "files" to t.files.map { it.toMap() },
+        )
+      }
+    }
+
+    /** Changes the tree in one library change; `editsJson` as `ursa_client::Edit` reads it. Resolves with the folders it made. */
+    AsyncFunction("edit") Coroutine { editsJson: String -> call { core.edit(editsJson) } }
 
     AsyncFunction("thumb") Coroutine { fileId: String -> call { Uri.fromFile(File(core.thumb(fileId))).toString() } }
 
@@ -327,6 +342,8 @@ private fun LibraryItem.toMap() =
     "width" to width?.toInt(),
     "height" to height?.toInt(),
     "hasThumb" to hasThumb,
+    "dir" to dir,
+    "path" to path,
   )
 
 private fun PoolNode.toMap() =

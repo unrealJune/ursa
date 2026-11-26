@@ -11,6 +11,7 @@ pub mod account;
 pub mod chunk;
 pub mod coding;
 pub mod crypto;
+pub mod folders;
 pub mod head;
 pub mod manifest;
 

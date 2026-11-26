@@ -19,6 +19,12 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
 
     public ObservableCollection<GalleryItem> Items { get; } = [];
 
+    /// <summary>Every folder of the library, by path. Replaced whole on each refresh.</summary>
+    public IReadOnlyList<FolderEntry> Folders { get; private set; } = [];
+
+    /// <summary>Raised on the UI thread after a refresh brought folders or files up to date.</summary>
+    public event Action? TreeChanged;
+
     // -------------------------------------------------------------------------------------
     // State the UI shows
 
@@ -334,12 +340,15 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         IsBusy = true;
         try
         {
-            var r = await host.CallAsync("list");
-            var fresh = r.GetProperty("items").EnumerateArray().Select(GalleryItem.FromJson).ToList();
+            var r = await host.CallAsync("tree");
+            Folders = [.. r.GetProperty("folders").EnumerateArray().Select(FolderEntry.FromJson)];
+            // Newest first, as the gallery shows them.
+            var fresh = r.GetProperty("files").EnumerateArray().Select(GalleryItem.FromJson)
+                .OrderByDescending(i => i.CreatedMs).ThenBy(i => i.FileId, StringComparer.Ordinal).ToList();
             // Brought in line item by item, never cleared and refilled: a reset of the whole
             // collection under the justified rows (LinedFlowLayout) is the suspect in a crash that
             // ended the app when a phone's uploads arrived. Items already shown keep their object,
-            // and with it their thumbnail and selection.
+            // and with it their thumbnail and selection; a rename or move updates it in place.
             var added = new List<GalleryItem>();
             for (int i = 0; i < fresh.Count; i++)
             {
@@ -347,18 +356,76 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
                 int at = -1;
                 for (int j = i; j < Items.Count; j++)
                     if (Items[j].FileId == id) { at = j; break; }
-                if (at == i) continue;
                 if (at > i) Items.Move(at, i);
-                else { Items.Insert(i, fresh[i]); added.Add(fresh[i]); }
+                if (at >= i)
+                {
+                    Items[i].Name = fresh[i].Name;
+                    Items[i].Dir = fresh[i].Dir;
+                    Items[i].Path = fresh[i].Path;
+                    continue;
+                }
+                Items.Insert(i, fresh[i]);
+                added.Add(fresh[i]);
             }
             while (Items.Count > fresh.Count) Items.RemoveAt(Items.Count - 1);
             _ = LoadThumbnailsAsync(added.Where(i => i.HasThumb).Concat(Items.Where(i => i.HasThumb && i.Thumbnail is null)).Distinct().ToList());
             Error = null;
+            OnUi(() => TreeChanged?.Invoke());
         }
         finally
         {
             IsBusy = false;
         }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Folders
+
+    /// <summary>
+    /// Changes the tree in one library change, then refreshes. Each edit is an object with an
+    /// <c>op</c> (create_folder, rename_folder, move_folder, delete_folder, rename_file,
+    /// move_file, delete_file) and its fields, as <c>ursa_client::Edit</c> reads them.
+    /// </summary>
+    public async Task EditAsync(IReadOnlyList<object> edits)
+    {
+        if (edits.Count == 0) return;
+        try
+        {
+            await host.CallAsync("edit", new { edits });
+        }
+        finally
+        {
+            await RefreshAsync();
+        }
+    }
+
+    public Task CreateFolderAsync(string? parent, string name) =>
+        EditAsync([new { op = "create_folder", parent, name }]);
+
+    /// <summary>The folder and every folder under it.</summary>
+    public HashSet<string> Subtree(string folderId)
+    {
+        var all = new HashSet<string> { folderId };
+        for (bool grew = true; grew;)
+        {
+            grew = false;
+            foreach (var f in Folders)
+                if (f.Parent is { } p && all.Contains(p) && all.Add(f.Id)) grew = true;
+        }
+        return all;
+    }
+
+    /// <summary><paramref name="name"/>, or "name (2)" and on if it is taken in <paramref name="dir"/>.</summary>
+    public string FreeName(string? dir, string name, bool isFolder)
+    {
+        bool Taken(string n) =>
+            Folders.Any(f => f.Parent == dir && string.Equals(f.Name, n, StringComparison.OrdinalIgnoreCase)) ||
+            Items.Any(i => i.Dir == dir && string.Equals(i.Name, n, StringComparison.OrdinalIgnoreCase));
+        if (!Taken(name)) return name;
+        string stem = isFolder ? name : System.IO.Path.GetFileNameWithoutExtension(name);
+        string ext = isFolder ? "" : System.IO.Path.GetExtension(name);
+        for (int i = 2; ; i++)
+            if (!Taken($"{stem} ({i}){ext}")) return $"{stem} ({i}){ext}";
     }
 
     private async Task LoadThumbnailsAsync(IEnumerable<GalleryItem> items)
@@ -411,25 +478,49 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         UpdateTransferText();
     });
 
-    public async Task UploadAsync(IReadOnlyList<StorageFile> files)
+    public Task UploadAsync(IReadOnlyList<StorageFile> files) => UploadIntoAsync([.. files], null);
+
+    /// <summary>
+    /// Uploads files and folders (with everything in them) into the library folder
+    /// <paramref name="dir"/> (null: the top). Folders are made first, in one change; files go
+    /// up staged and are written to the library together.
+    /// </summary>
+    public async Task UploadIntoAsync(IReadOnlyList<IStorageItem> items, string? dir)
     {
-        foreach (var file in files)
+        var edits = new List<object>();
+        var files = new List<(StorageFile File, string? Dir)>();
+        async Task Walk(IStorageItem item, string? parent, bool top)
         {
-            long size = (long)(await file.GetBasicPropertiesAsync()).Size;
-            BeginTransfer(size);
+            if (item is StorageFile f) files.Add((f, parent));
+            else if (item is StorageFolder folder)
+            {
+                string id = Guid.NewGuid().ToString("N");
+                // A folder that is already there gets a number, as a second copy.
+                string name = top ? FreeName(parent, folder.Name, isFolder: true) : folder.Name;
+                edits.Add(new { op = "create_folder", id, parent, name });
+                foreach (var child in await folder.GetItemsAsync())
+                    await Walk(child, id, false);
+            }
         }
+        foreach (var item in items) await Walk(item, dir, true);
+        if (edits.Count > 0) await host.CallAsync("edit", new { edits });
+
+        foreach (var (file, _) in files)
+            BeginTransfer((long)(await file.GetBasicPropertiesAsync()).Size);
         // A few at a time: each upload already keeps several chunks in flight.
         using var gate = new SemaphoreSlim(2, 2);
         var failures = new List<string>();
-        await Task.WhenAll(files.Select(async file =>
+        int staged = 0;
+        await Task.WhenAll(files.Select(async entry =>
         {
+            var (file, folder) = entry;
             await gate.WaitAsync();
             long size = 0, counted = 0;
             try
             {
                 size = (long)(await file.GetBasicPropertiesAsync()).Size;
                 var info = await Thumbnailer.InspectAsync(file);
-                var r = await host.CallAsync("upload", new
+                await host.CallAsync("upload_staged", new
                 {
                     path = file.Path,
                     name = file.Name,
@@ -439,11 +530,11 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
                     width = info.Width,
                     height = info.Height,
                     thumb_path = info.ThumbPath,
+                    dir = folder,
                 }, Track(() => counted, v => counted = v));
                 if (info.ThumbPath is not null) TryDelete(info.ThumbPath);
-                var item = GalleryItem.FromJson(r.GetProperty("item"));
-                Insert(item);
-                if (item.HasThumb) _ = LoadThumbnailsAsync([item]);
+                // Written in batches: a stop part-way keeps what went before.
+                if (Interlocked.Increment(ref staged) % 25 == 0) await host.CallAsync("commit_uploads");
             }
             catch (Exception e)
             {
@@ -455,14 +546,33 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
                 gate.Release();
             }
         }));
+        try
+        {
+            await host.CallAsync("commit_uploads");
+        }
+        finally
+        {
+            await RefreshAsync();
+        }
         Error = failures.Count == 0 ? null : $"{failures.Count} upload(s) failed. {failures[0]}";
     }
 
-    private void Insert(GalleryItem item)
+    /// <summary>Downloads a library folder and everything in it into <paramref name="outDir"/>; returns the folder written.</summary>
+    public async Task<string> DownloadFolderAsync(string folderId, string outDir)
     {
-        int at = 0;
-        while (at < Items.Count && Items[at].CreatedMs > item.CreatedMs) at++;
-        Items.Insert(at, item);
+        var inside = Subtree(folderId);
+        long size = Items.Where(i => i.Dir is { } d && inside.Contains(d)).Sum(i => i.Size);
+        long counted = 0;
+        BeginTransfer(size);
+        try
+        {
+            var r = await host.CallAsync("download_folder", new { folder_id = folderId, out_dir = outDir }, Track(() => counted, v => counted = v));
+            return r.GetProperty("path").GetString() ?? outDir;
+        }
+        finally
+        {
+            EndTransfer(size, counted);
+        }
     }
 
     public async Task DownloadAsync(GalleryItem item, string outPath)
@@ -537,6 +647,16 @@ public sealed class Library(HostClient host) : INotifyPropertyChanged
         field = value;
         Changed(name);
     }
+}
+
+/// <summary>A folder of the library.</summary>
+public sealed record FolderEntry(string Id, string? Parent, string Name, string Path)
+{
+    public static FolderEntry FromJson(JsonElement e) => new(
+        e.GetProperty("id").GetString()!,
+        e.TryGetProperty("parent", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null,
+        e.GetProperty("name").GetString() ?? "",
+        e.GetProperty("path").GetString() ?? "");
 }
 
 public sealed record DeviceRow(string Name, string Platform, string Device, bool IsThis)

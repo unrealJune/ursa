@@ -60,6 +60,7 @@ public sealed partial class MainWindow : Window
     {
         Type page = args.IsSettingsSelected ? typeof(SettingsPage) : (args.SelectedItem as NavigationViewItem)?.Tag switch
         {
+            "files" => typeof(FilesPage),
             "pool" => typeof(PoolPage),
             "usage" => typeof(UsagePage),
             _ => typeof(GalleryPage),

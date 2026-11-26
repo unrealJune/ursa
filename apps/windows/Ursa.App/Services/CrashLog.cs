@@ -1,10 +1,9 @@
 namespace Ursa.App.Services;
 
-/// <summary>Appends unhandled exceptions to %LOCALAPPDATA%\Ursa\crash.log.</summary>
+/// <summary>Appends unhandled exceptions to crash.log in the app's data (%LOCALAPPDATA%\Ursa, or URSA_DATA_DIR).</summary>
 public static class CrashLog
 {
-    public static string PathName { get; } =
-        System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Ursa", "crash.log");
+    public static string PathName { get; } = System.IO.Path.Combine(LocalStore.Root, "crash.log");
 
     public static void Write(string where, Exception? e)
     {

@@ -39,6 +39,9 @@ pub struct UploadMeta {
     pub height: Option<u32>,
     #[serde(default)]
     pub thumb_path: Option<PathBuf>,
+    /// The folder to put it in (an id from the tree); `None`: the root.
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 /// A file in the library, as a list shows it.
@@ -54,13 +57,21 @@ pub struct Item {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub has_thumb: bool,
+    /// The folder it is in; `None`: the root.
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// Its folder's path, `/`-separated; `""` at the root.
+    #[serde(default)]
+    pub path: String,
 }
 
 impl Item {
-    fn of(id: &ObjectId, m: &FileManifest) -> Self {
+    pub(crate) fn of(id: &ObjectId, m: &FileManifest) -> Self {
         Self {
             file_id: id.to_hex(),
             name: m.name.clone(),
+            dir: None,
+            path: String::new(),
             size: m.size,
             mime: m.mime.clone(),
             created_ms: m.created_ms,
@@ -88,11 +99,19 @@ pub(crate) struct Staged {
     id: ObjectId,
     added_ms: i64,
     at: ShardSet,
+    dir: Option<String>,
 }
 
 impl Staged {
     fn apply(&self, idx: &mut LibraryIndex) {
         idx.add(self.id, self.added_ms, Some(self.at.clone()));
+        if self.dir.is_some()
+            && let Some(e) = idx.entries.get_mut(&self.id)
+            && e.placed_ms == 0
+        {
+            e.dir = self.dir.clone();
+            e.placed_ms = self.added_ms;
+        }
     }
 }
 
@@ -251,11 +270,19 @@ impl Session {
 
     // -----------------------------------------------------------------------------------------
 
+    /// Every file, newest first, with its folder and its name as the tree shows it.
     pub async fn list(&self) -> Result<Vec<Item>> {
+        let mut items = self.tree().await?.files;
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_ms));
+        Ok(items)
+    }
+
+    /// The live files' manifests (those that open), with the index they came from.
+    pub(crate) async fn live_files(&self) -> Result<(LibraryIndex, Vec<(ObjectId, FileManifest)>)> {
         let idx = self.index().await?;
         let live: Vec<(ObjectId, IndexEntry)> = idx.entries.iter().filter(|(_, e)| !e.deleted).map(|(i, e)| (*i, e.clone())).collect();
-        let mut items: Vec<Item> = stream::iter(live)
-            .map(|(id, e)| async move { self.manifest(&id, &e).await.map(|m| Item::of(&id, &m)) })
+        let files = stream::iter(live)
+            .map(|(id, e)| async move { self.manifest(&id, &e).await.map(|m| (id, m)) })
             .buffer_unordered(8)
             .filter_map(|r| async move {
                 match r {
@@ -268,8 +295,7 @@ impl Session {
             })
             .collect()
             .await;
-        items.sort_by_key(|i| std::cmp::Reverse(i.created_ms));
-        Ok(items)
+        Ok((idx, files))
     }
 
     /// Uploads a file and writes it into the library index.
@@ -402,9 +428,21 @@ impl Session {
         };
         let (id, sealed) = manifest::seal(self.account.root(), &m);
         let at = self.store_object(&sealed, small, &writable, rotate).await?;
-        self.pending.lock().expect("pending uploads").push(Staged { id, added_ms: m.added_ms, at });
+        self.pending.lock().expect("pending uploads").push(Staged { id, added_ms: m.added_ms, at, dir: meta.dir.clone() });
         progress(total, total);
-        Ok(Item::of(&id, &m))
+        Ok(Item { dir: meta.dir.clone(), ..Item::of(&id, &m) })
+    }
+
+    /// A live file's manifest: its size and chunks, for reading parts of it.
+    pub async fn file_manifest(&self, file_id: &str) -> Result<FileManifest> {
+        Ok(self.entry(file_id).await?.2)
+    }
+
+    /// One chunk of a file, decrypted.
+    pub async fn read_chunk(&self, c: &ChunkRef) -> Result<Vec<u8>> {
+        let set = c.shards.as_ref().context("chunk has no shards (a 0.1 library)")?;
+        let ct = self.fetch_object(&c.id, set).await?;
+        open_chunk(&c.id, &c.key, &ct).map_err(|e| anyhow!("{e}"))
     }
 
     fn thumb_cache(&self, chunk: &ObjectId) -> PathBuf {

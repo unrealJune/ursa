@@ -15,9 +15,9 @@ export async function pickAndUpload() {
   );
 }
 
-/** Any files, through the system's document picker. */
-export async function pickFiles() {
+/** Any files, through the system's document picker; into the library folder `dir` when given. */
+export async function pickFiles(dir?: string | null) {
   const r = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: false });
   if (r.canceled) return;
-  enqueue(r.assets.map((a) => ({ uri: a.uri, meta: { name: a.name, mime: a.mimeType ?? undefined } })));
+  enqueue(r.assets.map((a) => ({ uri: a.uri, meta: { name: a.name, mime: a.mimeType ?? undefined, dir: dir ?? undefined } })));
 }

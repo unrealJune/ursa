@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use ursa_client::{Device, NetConfig, Session, UploadMeta};
+use ursa_client::{Device, Edit, NetConfig, Session, UploadMeta};
 use ursa_core::account::{Account, KeyFile, recovery_phrase, root_from_phrase};
 use ursa_core::crypto::AccountKey;
 
@@ -76,7 +76,30 @@ enum Cmd {
         quota_gb: u64,
     },
     /// Upload files; prints each one's file id.
-    Upload { files: Vec<PathBuf> },
+    Upload {
+        files: Vec<PathBuf>,
+        /// Into this library folder (a path like `Photos/2024`, made if missing).
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// Upload a folder and everything in it; prints the new folder's id.
+    UploadFolder {
+        path: PathBuf,
+        /// Into this library folder (a path, made if missing); the root without it.
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// Download a library folder (a path) and everything in it into OUT.
+    GetFolder { path: String, out: PathBuf },
+    /// The library as folders, as JSON.
+    Tree,
+    /// Make a library folder and any missing above it (a path like `Photos/2024`).
+    Mkdir { path: String },
+    /// Move and/or rename a file or folder: SOURCE and DEST are library paths. A DEST that is a
+    /// folder takes SOURCE inside it; otherwise SOURCE goes to DEST's folder under DEST's name.
+    Mv { source: String, dest: String },
+    /// Delete a file or a folder (and everything in it) by library path.
+    Del { path: String },
     /// List the library: file id, size, name.
     Ls,
     /// Download a file.
@@ -125,6 +148,37 @@ enum Cmd {
         #[arg(long, default_value_t = 72.0)]
         grace_hours: f64,
     },
+}
+
+/// What a library path names.
+enum Found {
+    /// `None`: the root.
+    Folder(Option<String>),
+    File(String),
+}
+
+impl Found {
+    fn folder(self) -> Option<Option<String>> {
+        match self {
+            Found::Folder(f) => Some(f),
+            Found::File(_) => None,
+        }
+    }
+}
+
+/// The folder or file at a `/`-separated library path (names compared ignoring case).
+async fn find(s: &Session, path: &str) -> Result<Option<Found>> {
+    let path = path.trim_matches('/');
+    let tree = s.tree().await?;
+    if path.is_empty() {
+        return Ok(Some(Found::Folder(None)));
+    }
+    let lower = path.to_lowercase();
+    if let Some(f) = tree.folders.iter().find(|f| f.path.to_lowercase() == lower) {
+        return Ok(Some(Found::Folder(Some(f.id.clone()))));
+    }
+    let full = |i: &ursa_client::Item| if i.path.is_empty() { i.name.clone() } else { format!("{}/{}", i.path, i.name) };
+    Ok(tree.files.iter().find(|i| full(i).to_lowercase() == lower).map(|i| Found::File(i.file_id.clone())))
 }
 
 fn root_path(profile: &Path) -> PathBuf {
@@ -247,12 +301,84 @@ async fn run(cli: &Cli, device: &Arc<Device>, platform: &str) -> Result<()> {
             let f = s.add_friend(invite, quota_gb * 1_000_000_000).await?;
             println!("{}", f.account);
         }
-        Cmd::Upload { files } => {
+        Cmd::Upload { files, dir } => {
             let s = session(cli, device, platform).await?;
+            let dir = match dir {
+                Some(d) => s.make_folders(d).await?,
+                None => None,
+            };
             for f in files {
-                let item = s.upload(UploadMeta { path: f.clone(), ..Default::default() }, |_, _| {}).await?;
+                let item = s.upload(UploadMeta { path: f.clone(), dir: dir.clone(), ..Default::default() }, |_, _| {}).await?;
                 println!("{}\t{}", item.file_id, item.name);
             }
+        }
+        Cmd::UploadFolder { path, dir } => {
+            let s = session(cli, device, platform).await?;
+            let dir = match dir {
+                Some(d) => s.make_folders(d).await?,
+                None => None,
+            };
+            let (id, n) = s.upload_folder(path, dir, |_, _| {}).await?;
+            eprintln!("uploaded {n} file(s)");
+            println!("{id}");
+        }
+        Cmd::GetFolder { path, out } => {
+            let s = session(cli, device, platform).await?;
+            let Some(Some(id)) = find(&s, path).await?.and_then(Found::folder) else { bail!("no folder at {path}") };
+            let written = s.download_folder(&id, out, |_, _| {}).await?;
+            println!("{}", written.display());
+        }
+        Cmd::Tree => {
+            let s = session(cli, device, platform).await?;
+            println!("{}", serde_json::to_string_pretty(&s.tree().await?)?);
+        }
+        Cmd::Mkdir { path } => {
+            let s = session(cli, device, platform).await?;
+            println!("{}", s.make_folders(path).await?.unwrap_or_default());
+        }
+        Cmd::Mv { source, dest } => {
+            let s = session(cli, device, platform).await?;
+            let src = find(&s, source).await?.with_context(|| format!("nothing at {source}"))?;
+            // Into an existing folder, or to a new place and name.
+            let (dir, name) = match find(&s, dest).await? {
+                Some(Found::Folder(d)) => (d, None),
+                Some(Found::File(_)) => bail!("{dest} is already there"),
+                None => {
+                    let d = dest.trim_matches('/');
+                    let (parent, name) = d.rsplit_once('/').unwrap_or(("", d));
+                    let dir = match find(&s, parent).await? {
+                        Some(Found::Folder(d)) => d,
+                        _ => bail!("no folder at {parent:?}"),
+                    };
+                    (dir, Some(name.to_string()))
+                }
+            };
+            let mut edits = Vec::new();
+            match src {
+                Found::Folder(None) => bail!("the root can't move"),
+                Found::Folder(Some(id)) => {
+                    edits.push(Edit::MoveFolder { id: id.clone(), parent: dir });
+                    if let Some(name) = name {
+                        edits.push(Edit::RenameFolder { id, name });
+                    }
+                }
+                Found::File(file_id) => {
+                    edits.push(Edit::MoveFile { file_id: file_id.clone(), dir });
+                    if let Some(name) = name {
+                        edits.push(Edit::RenameFile { file_id, name });
+                    }
+                }
+            }
+            s.edit(edits).await?;
+        }
+        Cmd::Del { path } => {
+            let s = session(cli, device, platform).await?;
+            let edit = match find(&s, path).await?.with_context(|| format!("nothing at {path}"))? {
+                Found::Folder(None) => bail!("the root can't be deleted"),
+                Found::Folder(Some(id)) => Edit::DeleteFolder { id, only_folder: false },
+                Found::File(file_id) => Edit::DeleteFile { file_id },
+            };
+            s.edit(vec![edit]).await?;
         }
         Cmd::Ls => {
             let s = session(cli, device, platform).await?;

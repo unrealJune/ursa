@@ -171,15 +171,31 @@ pub struct IndexEntry {
     /// Bumped by every re-placement, so the newest placement wins a merge.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub rev: u32,
+    /// The folder the file is in; `None` (and every file from before folders): the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<crate::folders::FolderId>,
+    /// The file's name once renamed; until then, its manifest's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// When `dir` or `name` last changed, ms; the newest wins a merge.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub placed_ms: i64,
+    /// Fields from a newer version, kept so writing the index here does not drop them.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn is_zero(v: &u32) -> bool {
     *v == 0
 }
 
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+
 impl IndexEntry {
     pub fn new(added_ms: i64, at: Option<crate::manifest::ShardSet>) -> Self {
-        Self { added_ms, deleted: false, at, manifest: None, rev: 0 }
+        Self { added_ms, deleted: false, at, manifest: None, rev: 0, dir: None, name: None, placed_ms: 0, extra: BTreeMap::new() }
     }
 
     /// The object holding this file's manifest.
@@ -198,6 +214,12 @@ impl IndexEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryIndex {
     pub entries: BTreeMap<ObjectId, IndexEntry>,
+    /// The folder tree; see [`crate::folders`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub folders: BTreeMap<crate::folders::FolderId, crate::folders::Folder>,
+    /// Fields from a newer version, kept so writing the index here does not drop them.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl LibraryIndex {
@@ -217,7 +239,7 @@ impl LibraryIndex {
     }
 
     /// Union of both sides; a deletion wins; the newest placement wins, and a known location
-    /// wins over none.
+    /// wins over none. Folders and a file's folder and name: the newest change wins.
     pub fn merge(&mut self, other: &LibraryIndex) {
         for (id, e) in &other.entries {
             let mine = self.entries.entry(*id).or_insert_with(|| e.clone());
@@ -227,6 +249,14 @@ impl LibraryIndex {
                 mine.manifest = e.manifest;
                 mine.rev = e.rev;
             }
+            if (e.placed_ms, &e.dir, &e.name) > (mine.placed_ms, &mine.dir, &mine.name) {
+                mine.dir = e.dir.clone();
+                mine.name = e.name.clone();
+                mine.placed_ms = e.placed_ms;
+            }
+        }
+        for (id, f) in &other.folders {
+            self.folders.entry(id.clone()).or_insert_with(|| f.clone()).merge(f);
         }
     }
 

@@ -102,6 +102,33 @@ pub struct LibraryItem {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub has_thumb: bool,
+    /// The folder it is in; `None`: the root.
+    pub dir: Option<String>,
+    /// Its folder's path, `/`-separated; empty at the root.
+    pub path: String,
+}
+
+/// A folder of the library.
+#[derive(uniffi::Record)]
+pub struct FolderEntry {
+    pub id: String,
+    pub parent: Option<String>,
+    pub name: String,
+    /// `/`-separated from the root, its own name included.
+    pub path: String,
+}
+
+impl From<ursa_client::FolderItem> for FolderEntry {
+    fn from(f: ursa_client::FolderItem) -> Self {
+        Self { id: f.id, parent: f.parent, name: f.name, path: f.path }
+    }
+}
+
+/// Every folder and every file: the library as the Files screen browses it.
+#[derive(uniffi::Record)]
+pub struct LibraryTree {
+    pub folders: Vec<FolderEntry>,
+    pub files: Vec<LibraryItem>,
 }
 
 impl From<ursa_client::Item> for LibraryItem {
@@ -117,6 +144,8 @@ impl From<ursa_client::Item> for LibraryItem {
             width: i.width,
             height: i.height,
             has_thumb: i.has_thumb,
+            dir: i.dir,
+            path: i.path,
         }
     }
 }
@@ -131,6 +160,9 @@ pub struct UploadRequest {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub thumb_path: Option<String>,
+    /// The folder to put it in; `None`: the root.
+    #[uniffi(default = None)]
+    pub dir: Option<String>,
 }
 
 impl From<UploadRequest> for UploadMeta {
@@ -144,6 +176,7 @@ impl From<UploadRequest> for UploadMeta {
             width: r.width,
             height: r.height,
             thumb_path: r.thumb_path.map(Into::into),
+            dir: r.dir,
         }
     }
 }
@@ -736,6 +769,39 @@ impl UrsaCore {
                 .into_iter()
                 .map(Into::into)
                 .collect())
+        })
+        .await
+    }
+
+    /// Every folder and every file, with each file's folder.
+    pub async fn tree(&self) -> Res<LibraryTree> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            let t = inner.session().await?.tree().await?;
+            Ok(LibraryTree {
+                folders: t.folders.into_iter().map(Into::into).collect(),
+                files: t.files.into_iter().map(Into::into).collect(),
+            })
+        })
+        .await
+    }
+
+    /// Makes a folder in `parent` (`None`: the root); returns its id.
+    pub async fn create_folder(&self, parent: Option<String>, name: String) -> Res<String> {
+        let inner = self.inner.clone();
+        on_rt(async move { inner.session().await?.create_folder(parent, &name).await }).await
+    }
+
+    /// Changes the tree in one library change. `edits_json` is a JSON array of edits, each
+    /// `{"op": …}` as `ursa_client::Edit` reads them: `create_folder` (`parent`, `name`, optional
+    /// `id`), `rename_folder` (`id`, `name`), `move_folder` (`id`, `parent`), `delete_folder`
+    /// (`id`, optional `only_folder`), `rename_file` (`file_id`, `name`), `move_file` (`file_id`,
+    /// `dir`), `delete_file` (`file_id`). Returns the ids of the folders it made.
+    pub async fn edit(&self, edits_json: String) -> Res<Vec<String>> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            let edits: Vec<ursa_client::Edit> = serde_json::from_str(&edits_json).map_err(|e| anyhow!("bad edits: {e}"))?;
+            inner.session().await?.edit(edits).await
         })
         .await
     }

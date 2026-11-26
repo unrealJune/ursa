@@ -9,7 +9,13 @@ namespace Ursa.App.Services;
 public sealed class GalleryItem : INotifyPropertyChanged
 {
     public required string FileId { get; init; }
-    public required string Name { get; init; }
+    private string name = "";
+    public required string Name { get => name; set { if (name == value) return; name = value; Changed(); } }
+    /// <summary>The folder it is in; null at the top.</summary>
+    public string? Dir { get; set; }
+    /// <summary>Its folder's path, "/"-separated; empty at the top.</summary>
+    public string Path { get; set; } = "";
+    public long ModifiedMs { get; init; }
     public long Size { get; init; }
     public string Mime { get; init; } = "application/octet-stream";
     public long CreatedMs { get; init; }
@@ -51,6 +57,9 @@ public sealed class GalleryItem : INotifyPropertyChanged
         Width = e.TryGetProperty("width", out var w) && w.ValueKind == JsonValueKind.Number ? w.GetUInt32() : null,
         Height = e.TryGetProperty("height", out var h) && h.ValueKind == JsonValueKind.Number ? h.GetUInt32() : null,
         HasThumb = e.TryGetProperty("has_thumb", out var t) && t.GetBoolean(),
+        ModifiedMs = e.TryGetProperty("modified_ms", out var m) && m.ValueKind == JsonValueKind.Number ? m.GetInt64() : 0,
+        Dir = e.TryGetProperty("dir", out var d) && d.ValueKind == JsonValueKind.String ? d.GetString() : null,
+        Path = e.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() ?? "" : "",
     };
 
     public static string FormatBytes(long b) => b switch

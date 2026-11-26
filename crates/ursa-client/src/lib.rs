@@ -7,6 +7,7 @@
 //!   and offers link codes to new devices.
 
 pub mod capacity;
+pub mod folders;
 pub mod gc;
 pub mod library;
 pub mod locator;
@@ -32,6 +33,7 @@ use ursa_core::head::{AccountState, DeviceEntry, Friend, Head, NodeRef};
 use ursa_proto::link::{LinkCode, LinkHandler, LinkNetwork};
 use ursa_proto::{ClaimLink, HeadPut, NodeClient, NodeInfo, Role, parse_addr, ticket_of};
 
+pub use folders::{Edit, FolderItem, LibraryTree};
 pub use library::{Item, UploadMeta};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);

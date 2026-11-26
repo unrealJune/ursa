@@ -55,7 +55,7 @@ export default function Backup() {
       <Group>
         <ListRow icon="add-photo-alternate" title="Photos and videos" onPress={pickAndUpload} />
         <Divider inset={56} />
-        <ListRow icon="upload-file" title="Files" onPress={pickFiles} />
+        <ListRow icon="upload-file" title="Files" onPress={() => pickFiles()} />
       </Group>
     </Page>
   );
