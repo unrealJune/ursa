@@ -239,13 +239,31 @@
                             <TextBlock Text="Device ID" />
                             <TextBlock Text="{x:Bind Short(Library.DeviceId), Mode=OneWay}" FontFamily="Consolas" IsTextSelectionEnabled="True" Style="{StaticResource Hint}" />
                         </StackPanel>
-                        <StackPanel Visibility="{x:Bind services:Telemetry.Enabled}">
-                            <TextBlock Text="Telemetry ID" />
-                            <TextBlock Text="{x:Bind services:Telemetry.Id}" FontFamily="Consolas" IsTextSelectionEnabled="True" Style="{StaticResource Hint}" />
-                            <TextBlock Text="This build sends diagnostics to its developer." Style="{StaticResource Hint}" />
+                        <StackPanel Visibility="{x:Bind services:Telemetry.Available}">
+                            <ToggleSwitch x:Name="Diagnostics" Header="Send diagnostics to Ursa's developer" Toggled="OnDiagnosticsToggled" />
+                            <TextBlock Style="{StaticResource Hint}"
+                                       Text="Errors and timings from this app, never file names, contents or keys. The background process follows the next time Ursa starts." />
+                            <TextBlock Style="{StaticResource Hint}" IsTextSelectionEnabled="True" FontFamily="Consolas"
+                                       Text="{x:Bind services:Telemetry.Id}" />
                         </StackPanel>
                     </StackPanel>
                     <Button Grid.Column="1" Content="Open data folder" Click="OnOpenData" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <TextBlock Text="Updates" Style="{StaticResource Section}" />
+            <Border Style="{StaticResource Card}">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="UpdateStatus" TextWrapping="Wrap" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <Button x:Name="UpdateCheck" Content="Check now" Click="OnCheckForUpdates" />
+                        <Button x:Name="UpdateRestart" Content="Restart to update" Click="OnRestartToUpdate"
+                                Style="{StaticResource AccentButtonStyle}" Visibility="Collapsed" />
+                    </StackPanel>
                 </Grid>
             </Border>
 

@@ -47,6 +47,9 @@ public static class LocalStore
         public List<string> Relays { get; set; } = ["https://iroh-euw.streetcrypt.id", "https://iroh-wus.streetcrypt.id"];
         public string? RelayTokenProtected { get; set; }
 
+        /// <summary>Send diagnostics to the developer: null until the user chooses (then the build's default).</summary>
+        public bool? SendDiagnostics { get; set; }
+
         public string? RelayToken
         {
             get => RelayTokenProtected is null ? null : Encoding.UTF8.GetString(

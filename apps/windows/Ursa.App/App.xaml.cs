@@ -24,6 +24,7 @@ public partial class App : Application
     {
         Window = new MainWindow();
         Window.Activate();
+        Updater.Start();
         _ = StartAsync();
     }
 

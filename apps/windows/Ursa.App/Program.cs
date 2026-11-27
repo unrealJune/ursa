@@ -9,7 +9,7 @@ public static class Program
     [STAThread]
     public static void Main(string[] args)
     {
-        // Install, uninstall and first-run hooks. Updates are off for now: nothing here checks.
+        // Install, uninstall and first-run hooks. Updates are checked from App (Services/Updater).
         VelopackApp.Build().Run();
         WinRT.ComWrappersSupport.InitializeComWrappers();
         Application.Start(init =>

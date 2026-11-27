@@ -36,6 +36,10 @@
   <ItemGroup Condition="'$(UrsaOtelEndpoint)' != ''">
     <AssemblyMetadata Include="UrsaOtelEndpoint" Value="$(UrsaOtelEndpoint)" />
   </ItemGroup>
+  <!-- Diagnostics are off until the user turns them on; CI's non-release builds pass on. -->
+  <ItemGroup Condition="'$(UrsaTelemetryDefault)' != ''">
+    <AssemblyMetadata Include="UrsaTelemetryDefault" Value="$(UrsaTelemetryDefault)" />
+  </ItemGroup>
   <!-- Unpackaged WinUI omits the app PRI from publish (WindowsAppSDK#6720). -->
   <Target Name="PublishUnpackagedProjectPri" BeforeTargets="ComputeResolvedFilesToPublishList" DependsOnTargets="$(GenerateProjectPriFile)" Condition="'$(WindowsPackageType)' == 'None' and '$(UseWinUI)' == 'true'">
     <ItemGroup>

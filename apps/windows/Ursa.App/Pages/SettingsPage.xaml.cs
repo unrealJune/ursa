@@ -19,8 +19,30 @@ public sealed partial class SettingsPage : Page
         RelayUrls.Text = string.Join(Environment.NewLine, settings.Relays);
         RelayToken.PlaceholderText = settings.RelayTokenProtected is null ? "None" : "Saved (leave empty to keep it)";
         string version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "dev";
-        About.Text = $"Ursa {version.Split('+')[0]} for Windows. Private, encrypted photo and file storage on your own and your friends' nodes.";
+        About.Text = $"Ursa {version.Split('+')[0]} for Windows. Private, encrypted photo and file storage on your own and your friends' nodes. Free software under the GNU GPL v3 or later.";
+        Diagnostics.IsOn = Telemetry.Enabled;
+        Updater.Changed += OnUpdaterChanged;
+        Unloaded += (_, _) => Updater.Changed -= OnUpdaterChanged;
+        ShowUpdateState();
     }
+
+    private void OnDiagnosticsToggled(object sender, RoutedEventArgs e)
+    {
+        if (Diagnostics.IsOn != Telemetry.Enabled) Telemetry.SetConsent(Diagnostics.IsOn);
+    }
+
+    private void OnUpdaterChanged() => DispatcherQueue.TryEnqueue(ShowUpdateState);
+
+    private void ShowUpdateState()
+    {
+        UpdateStatus.Text = Updater.Status;
+        UpdateCheck.IsEnabled = Updater.Supported;
+        UpdateRestart.Visibility = Updater.ReadyVersion is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void OnCheckForUpdates(object sender, RoutedEventArgs e) => await Updater.CheckAsync();
+
+    private async void OnRestartToUpdate(object sender, RoutedEventArgs e) => await Updater.RestartNowAsync();
 
     protected override async void OnNavigatedTo(NavigationEventArgs e)
     {

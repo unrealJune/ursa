@@ -14,7 +14,10 @@ namespace Ursa.App.Services;
 /// </summary>
 /// <remarks>
 /// The collector comes from <c>URSA_OTEL_ENDPOINT</c>, else from the build (CI sets the
-/// <c>UrsaOtelEndpoint</c> MSBuild property). Without either, nothing is sent.
+/// <c>UrsaOtelEndpoint</c> MSBuild property). Without either, nothing is sent. With one from the
+/// build, nothing is sent either until the user turns diagnostics on in Settings; builds that
+/// are not releases (<c>UrsaTelemetryDefault=on</c>) start with it on. Setting the environment
+/// variable yourself counts as turning it on.
 /// Nothing here reads file names or contents: it sends what the code passes it.
 /// </remarks>
 public static class Telemetry
@@ -22,8 +25,15 @@ public static class Telemetry
     private static ILoggerFactory? factory;
     private static ILogger? logger;
 
-    public static string? Endpoint { get; } = FindEndpoint();
-    public static bool Enabled => Endpoint is not null;
+    private static readonly string? EnvEndpoint = Clean(Environment.GetEnvironmentVariable("URSA_OTEL_ENDPOINT"));
+
+    public static string? Endpoint { get; } = EnvEndpoint ?? Clean(BuildMetadata("UrsaOtelEndpoint"));
+
+    /// <summary>Whether this build can send diagnostics at all (it names a collector).</summary>
+    public static bool Available => Endpoint is not null;
+
+    /// <summary>Whether it sends them: the collector is known and the user agreed (or set it themselves).</summary>
+    public static bool Enabled { get; private set; } = Available && (EnvEndpoint is not null || Consent());
 
     /// <summary>This install's telemetry id: shown in Settings, and what to search the collector for.</summary>
     public static string Id { get; } = LoadId();
@@ -33,7 +43,7 @@ public static class Telemetry
 
     public static void Start()
     {
-        if (Endpoint is null || factory is not null) return;
+        if (!Enabled || factory is not null) return;
         factory = LoggerFactory.Create(b => b.AddOpenTelemetry(o =>
         {
             o.IncludeFormattedMessage = true;
@@ -56,7 +66,7 @@ public static class Telemetry
     /// <summary>What the host needs to export as the same install.</summary>
     public static IEnumerable<KeyValuePair<string, string>> HostEnvironment()
     {
-        if (Endpoint is null) yield break;
+        if (!Enabled || Endpoint is null) yield break;
         yield return new("OTEL_EXPORTER_OTLP_ENDPOINT", Endpoint);
         yield return new("OTEL_SERVICE_INSTANCE_ID", Id);
         yield return new("OTEL_SERVICE_VERSION", Version);
@@ -75,14 +85,36 @@ public static class Telemetry
         f?.Dispose();
     }
 
-    private static string? FindEndpoint()
+    /// <summary>
+    /// The user's answer from Settings. The app's own logs follow at once; the host picks it up
+    /// the next time Ursa starts.
+    /// </summary>
+    public static void SetConsent(bool on)
     {
-        string? e = Environment.GetEnvironmentVariable("URSA_OTEL_ENDPOINT");
-        if (string.IsNullOrWhiteSpace(e))
-            e = typeof(Telemetry).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
-                .FirstOrDefault(a => a.Key == "UrsaOtelEndpoint")?.Value;
-        return string.IsNullOrWhiteSpace(e) ? null : e.Trim().TrimEnd('/');
+        var settings = LocalStore.LoadSettings();
+        settings.SendDiagnostics = on;
+        LocalStore.SaveSettings(settings);
+        if (!Available) return;
+        if (on)
+        {
+            Enabled = true;
+            Start();
+        }
+        else
+        {
+            Info("diagnostics turned off");
+            Flush();
+            Enabled = EnvEndpoint is not null;
+        }
     }
+
+    private static bool Consent() =>
+        LocalStore.LoadSettings().SendDiagnostics ?? string.Equals(BuildMetadata("UrsaTelemetryDefault"), "on", StringComparison.OrdinalIgnoreCase);
+
+    private static string? BuildMetadata(string key) =>
+        typeof(Telemetry).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == key)?.Value;
+
+    private static string? Clean(string? e) => string.IsNullOrWhiteSpace(e) ? null : e.Trim().TrimEnd('/');
 
     private static string LoadId()
     {

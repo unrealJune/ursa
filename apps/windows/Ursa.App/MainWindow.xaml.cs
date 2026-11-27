@@ -16,8 +16,17 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        // Send what is buffered before the process goes.
-        Closed += (_, _) => Services.Telemetry.Flush();
+        // Send what is buffered before the process goes, and hand a downloaded update to
+        // Velopack, which installs it once this process (and the host it started) has exited.
+        Closed += (_, _) =>
+        {
+            Services.Telemetry.Flush();
+            if (Updater.ReadyVersion is not null)
+            {
+                _ = App.Host.StopAsync();
+                Updater.ApplyOnExit();
+            }
+        };
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
