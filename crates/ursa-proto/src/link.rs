@@ -79,7 +79,9 @@ enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed_network: Option<String>,
     },
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
 }
 
 /// The offering device's network settings, handed to the device that joins.
@@ -195,7 +197,8 @@ impl LinkHandler {
         let (code, account, network, now_ms, prompt) = {
             let guard = self.offer.lock().await;
             let Some(o) = guard.as_ref() else {
-                write_header(&mut send, &Reply::Rejected { reason: "no link offer is open on that device".into() }).await?;
+                write_header(&mut send, &Reply::Rejected { reason: "no link offer is open on that device".into() })
+                    .await?;
                 send.finish()?;
                 return Ok(());
             };
@@ -213,16 +216,22 @@ impl LinkHandler {
         let (decide, decision) = oneshot::channel();
         let who = Joiner { device: joiner.clone(), name: hello.name.clone(), platform: hello.platform.clone() };
         prompt.send((who, shown, decide)).await.map_err(|_| anyhow!("nobody is watching the offer"))?;
-        let accepted = tokio::time::timeout(std::time::Duration::from_secs(300), decision).await.ok().and_then(|r| r.ok()).unwrap_or(false);
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(300), decision)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false);
         let reply = if accepted {
             // One device per code.
             *self.offer.lock().await = None;
-            let sealed = seal_to(&xwing, account.root().as_bytes(), &transcript(&offerer, &joiner, &xwing)).map_err(|e| anyhow!("{e}"))?;
+            let sealed = seal_to(&xwing, account.root().as_bytes(), &transcript(&offerer, &joiner, &xwing))
+                .map_err(|e| anyhow!("{e}"))?;
             let cert = DeviceCert::issue(&account, &joiner, &hello.name, &hello.platform, now_ms);
             let sealed_network = match &network {
                 Some(n) => {
                     let json = serde_json::to_vec(n)?;
-                    let sealed = seal_to(&xwing, &json, &network_transcript(&offerer, &joiner, &xwing)).map_err(|e| anyhow!("{e}"))?;
+                    let sealed = seal_to(&xwing, &json, &network_transcript(&offerer, &joiner, &xwing))
+                        .map_err(|e| anyhow!("{e}"))?;
                     Some(base64_encode(&sealed))
                 }
                 None => None,
@@ -271,7 +280,12 @@ pub async fn join(
     let (mut send, mut recv) = conn.open_bi().await?;
     write_header(
         &mut send,
-        &Hello { proof: proof(&code.secret, &me), xwing: base64_encode(&xwing), name: name.into(), platform: platform.into() },
+        &Hello {
+            proof: proof(&code.secret, &me),
+            xwing: base64_encode(&xwing),
+            name: name.into(),
+            platform: platform.into(),
+        },
     )
     .await?;
     send.finish()?;

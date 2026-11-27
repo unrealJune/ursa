@@ -109,10 +109,9 @@ impl AccountPublic {
         if ed_pk.verify(&m, &ed25519_dalek::Signature::from_bytes(&ed_sig)).is_err() {
             return false;
         }
-        let (Ok(pk), Ok(s)) = (
-            <[u8; ML_DSA_PK]>::try_from(self.ml_dsa.as_slice()),
-            <[u8; ML_DSA_SIG]>::try_from(sig.ml_dsa.as_slice()),
-        ) else {
+        let (Ok(pk), Ok(s)) =
+            (<[u8; ML_DSA_PK]>::try_from(self.ml_dsa.as_slice()), <[u8; ML_DSA_SIG]>::try_from(sig.ml_dsa.as_slice()))
+        else {
             return false;
         };
         libcrux_ml_dsa::ml_dsa_65::verify(
@@ -268,7 +267,8 @@ pub fn recovery_phrase(root: &AccountKey) -> String {
 
 pub fn root_from_phrase(phrase: &str) -> Result<AccountKey> {
     let words = phrase.split_whitespace().map(str::to_lowercase).collect::<Vec<_>>().join(" ");
-    let m = bip39::Mnemonic::parse_in(bip39::Language::English, &words).map_err(|_| Error::Malformed("recovery phrase"))?;
+    let m =
+        bip39::Mnemonic::parse_in(bip39::Language::English, &words).map_err(|_| Error::Malformed("recovery phrase"))?;
     let entropy = m.to_entropy();
     let bytes: [u8; 32] = entropy.as_slice().try_into().map_err(|_| Error::Malformed("recovery phrase length"))?;
     Ok(AccountKey::from_bytes(bytes))

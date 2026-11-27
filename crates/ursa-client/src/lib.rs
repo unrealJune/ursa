@@ -21,10 +21,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::StreamExt;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMap, RelayMode, RelayUrl, SecretKey};
 use serde::{Deserialize, Serialize};
-use futures_util::StreamExt;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 use ursa_core::account::{Account, AccountId, DeviceCert};
@@ -131,7 +131,10 @@ impl Device {
         let pkarr = if net.pkarr.is_empty() {
             locator::default_relays()
         } else {
-            net.pkarr.iter().map(|u| u.parse().map_err(|e| anyhow!("bad pkarr relay {u}: {e}"))).collect::<Result<_>>()?
+            net.pkarr
+                .iter()
+                .map(|u| u.parse().map_err(|e| anyhow!("bad pkarr relay {u}: {e}")))
+                .collect::<Result<_>>()?
         };
         Ok(Arc::new(Self { data_dir: data_dir.to_path_buf(), endpoint, router, link, pkarr, net: net.clone() }))
     }
@@ -153,14 +156,16 @@ impl Device {
     }
 
     /// A brand-new account, with this device as its first.
-    pub async fn create_account(self: &Arc<Self>, name: &str, device_name: &str, platform: &str) -> Result<Arc<Session>> {
+    pub async fn create_account(
+        self: &Arc<Self>,
+        name: &str,
+        device_name: &str,
+        platform: &str,
+    ) -> Result<Arc<Session>> {
         let account = Account::generate();
         let session = Session::new(self.clone(), account, device_name, platform);
-        let state = AccountState {
-            name: name.to_string(),
-            devices: vec![session.device_entry()],
-            ..Default::default()
-        };
+        let state =
+            AccountState { name: name.to_string(), devices: vec![session.device_entry()], ..Default::default() };
         session.save_local(&state);
         *session.head.lock().await = Some((None, state));
         Ok(session)
@@ -199,7 +204,11 @@ impl Device {
     ) -> Result<Linked> {
         let joined = ursa_proto::link::join(&self.endpoint, code, device_name, platform, on_confirmation).await?;
         info!(network = joined.network.is_some(), "join: the other device sent the account key");
-        let network = joined.network.map(|n| NetConfig { relays: n.relays, relay_token: n.relay_token, pkarr: self.net.pkarr.clone() });
+        let network = joined.network.map(|n| NetConfig {
+            relays: n.relays,
+            relay_token: n.relay_token,
+            pkarr: self.net.pkarr.clone(),
+        });
         // The account's nodes are reached through the account's relays, and an endpoint's relays
         // are fixed when it binds: a device started without them (a phone fresh from install has
         // no relay token) must restart on them before it can find the account. Same device key,
@@ -269,13 +278,17 @@ pub struct Invite {
 impl Invite {
     pub fn encode(&self) -> String {
         use base64::Engine;
-        format!("ursa-invite:{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(self).expect("json")))
+        format!(
+            "ursa-invite:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(self).expect("json"))
+        )
     }
 
     pub fn decode(s: &str) -> Result<Self> {
         use base64::Engine;
         let b = s.trim().strip_prefix("ursa-invite:").ok_or_else(|| anyhow!("not an ursa-invite: code"))?;
-        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).map_err(|_| anyhow!("malformed invite"))?;
+        let json =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).map_err(|_| anyhow!("malformed invite"))?;
         serde_json::from_slice(&json).map_err(|_| anyhow!("malformed invite"))
     }
 }
@@ -298,7 +311,12 @@ impl Session {
     }
 
     fn device_entry(&self) -> DeviceEntry {
-        DeviceEntry { device: self.device.id(), name: self.device_name.clone(), platform: self.platform.clone(), added_ms: now_ms() }
+        DeviceEntry {
+            device: self.device.id(),
+            name: self.device_name.clone(),
+            platform: self.platform.clone(),
+            added_ms: now_ms(),
+        }
     }
 
     pub fn account_id(&self) -> AccountId {
@@ -334,10 +352,11 @@ impl Session {
             bail!("node {} did not answer {}s ago", short(&r.id), at.elapsed().as_secs());
         }
         let addr = Self::addr_of(r)?;
-        let dialled = tokio::time::timeout(CONNECT_TIMEOUT, NodeClient::connect(&self.device.endpoint, addr, &self.cert))
-            .await
-            .map_err(|_| anyhow!("node {} did not answer", short(&r.id)))
-            .and_then(|r| r);
+        let dialled =
+            tokio::time::timeout(CONNECT_TIMEOUT, NodeClient::connect(&self.device.endpoint, addr, &self.cert))
+                .await
+                .map_err(|_| anyhow!("node {} did not answer", short(&r.id)))
+                .and_then(|r| r);
         match dialled {
             Ok(c) => {
                 info!(node = %short(&r.id), paths = %Self::paths_of(&c), "node reached");
@@ -568,7 +587,11 @@ impl Session {
                 match r {
                     Ok(None) => stored += 1,
                     Ok(Some(h)) => {
-                        if h.verify() && h.account.id == self.account.id() && h.seq >= seq && newer.as_ref().is_none_or(|n| h.seq > n.seq) {
+                        if h.verify()
+                            && h.account.id == self.account.id()
+                            && h.seq >= seq
+                            && newer.as_ref().is_none_or(|n| h.seq > n.seq)
+                        {
                             newer = Some(h);
                         }
                     }
@@ -669,7 +692,8 @@ impl Session {
     /// Every node in the pool, checked now.
     pub async fn pool(&self) -> Vec<PoolNode> {
         let state = self.state().await;
-        let mut entries: Vec<(NodeRef, String)> = state.home_nodes.iter().map(|n| (n.clone(), "home".to_string())).collect();
+        let mut entries: Vec<(NodeRef, String)> =
+            state.home_nodes.iter().map(|n| (n.clone(), "home".to_string())).collect();
         for f in &state.friends {
             for n in &f.nodes {
                 if !entries.iter().any(|(e, _)| e.id == n.id) {
@@ -685,10 +709,26 @@ impl Session {
             }
             .await
             {
-                Ok((path, info)) => PoolNode { id: n.id, label: n.label, owner, reachable: true, path: Some(path), info: Some(info), error: None },
+                Ok((path, info)) => PoolNode {
+                    id: n.id,
+                    label: n.label,
+                    owner,
+                    reachable: true,
+                    path: Some(path),
+                    info: Some(info),
+                    error: None,
+                },
                 Err(e) => {
                     self.drop_conn(&n.id).await;
-                    PoolNode { id: n.id, label: n.label, owner, reachable: false, path: None, info: None, error: Some(format!("{e:#}")) }
+                    PoolNode {
+                        id: n.id,
+                        label: n.label,
+                        owner,
+                        reachable: false,
+                        path: None,
+                        info: None,
+                        error: Some(format!("{e:#}")),
+                    }
                 }
             }
         }))
@@ -700,7 +740,8 @@ impl Session {
     /// now still shows its figures.
     fn remember_node_info(&self, mut nodes: Vec<PoolNode>) -> Vec<PoolNode> {
         let path = self.device.data_dir.join("node-info.json");
-        let mut known: HashMap<String, NodeInfo> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut known: HashMap<String, NodeInfo> =
+            std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for n in &mut nodes {
             match &n.info {
                 Some(i) if n.reachable => {
@@ -726,11 +767,11 @@ impl Session {
                 continue;
             }
             domains.push(p.owner.clone());
-            let r = state
-                .pool()
-                .into_iter()
-                .find(|n| n.id == p.id)
-                .unwrap_or(NodeRef { id: p.id.clone(), ticket: None, label: String::new() });
+            let r = state.pool().into_iter().find(|n| n.id == p.id).unwrap_or(NodeRef {
+                id: p.id.clone(),
+                ticket: None,
+                label: String::new(),
+            });
             out.push(r);
         }
         out
@@ -738,7 +779,9 @@ impl Session {
 
     /// Offers a link code for a new device. Each join attempt arrives on the receiver with the
     /// confirmation code to show and a sender for the person's yes or no.
-    pub async fn offer_link(&self) -> (LinkCode, tokio::sync::mpsc::Receiver<(ursa_proto::link::Joiner, String, ursa_proto::link::Decision)>) {
+    pub async fn offer_link(
+        &self,
+    ) -> (LinkCode, tokio::sync::mpsc::Receiver<(ursa_proto::link::Joiner, String, ursa_proto::link::Decision)>) {
         let net = &self.device.net;
         let network = LinkNetwork { relays: net.relays.clone(), relay_token: net.relay_token.clone() };
         self.device.link.offer(&self.device.endpoint, self.account.clone(), Some(network), now_ms()).await

@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn offline_hours_match_the_plan_table() {
-        // PLAN.md: 4-of-6 at 95% uptime ≈ 20 h a year; 6-of-10 ≈ 0.6 h.
+        // docs/design.md: 4-of-6 at 95% uptime ≈ 20 h a year; 6-of-10 ≈ 0.6 h.
         let h = offline_hours(c(4, 6), &[0.95; 6]).unwrap();
         assert!((h - 20.0).abs() < 1.5, "{h}");
         let h = offline_hours(c(6, 10), &[0.95; 10]).unwrap();

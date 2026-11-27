@@ -106,7 +106,11 @@ impl Node {
                 .read()
                 .await
                 .iter()
-                .map(|(a, q)| GrantInfo { account: *a, quota_bytes: *q, used_bytes: usage.get(a).copied().unwrap_or(0) })
+                .map(|(a, q)| GrantInfo {
+                    account: *a,
+                    quota_bytes: *q,
+                    used_bytes: usage.get(a).copied().unwrap_or(0),
+                })
                 .collect()
         } else {
             Vec::new()
@@ -116,10 +120,11 @@ impl Node {
             u.beat(now_ms());
             u.fraction(now_ms())
         };
-        let (disk_total_bytes, disk_free_bytes) = match (role == Role::Owner).then(|| self.inner.store.disk_space()).flatten() {
-            Some((t, f)) => (Some(t), Some(f)),
-            None => (None, None),
-        };
+        let (disk_total_bytes, disk_free_bytes) =
+            match (role == Role::Owner).then(|| self.inner.store.disk_space()).flatten() {
+                Some((t, f)) => (Some(t), Some(f)),
+                None => (None, None),
+            };
         NodeInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             backend: self.inner.store.kind().to_string(),
@@ -135,7 +140,13 @@ impl Node {
         }
     }
 
-    async fn handle(&self, who: &str, session: &Mutex<Option<AccountId>>, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
+    async fn handle(
+        &self,
+        who: &str,
+        session: &Mutex<Option<AccountId>>,
+        send: &mut SendStream,
+        recv: &mut RecvStream,
+    ) -> Result<()> {
         let req: Request = read_header(recv).await?;
         let store = &self.inner.store;
 
@@ -154,7 +165,8 @@ impl Node {
             }
             Request::Info => {
                 let account = *session.lock().await;
-                return reply(send, &Response { info: Some(self.info(account.as_ref()).await), ..Response::ok() }).await;
+                return reply(send, &Response { info: Some(self.info(account.as_ref()).await), ..Response::ok() })
+                    .await;
             }
             _ => {}
         }
@@ -279,7 +291,11 @@ impl Node {
                     };
                     let current_seq = current.as_ref().map(|h| h.seq);
                     if current_seq != expected_seq || current_seq.is_some_and(|s| head.seq <= s) {
-                        Response { conflict: current.map(Box::new), error: Some("head changed".into()), ..Default::default() }
+                        Response {
+                            conflict: current.map(Box::new),
+                            error: Some("head changed".into()),
+                            ..Default::default()
+                        }
                     } else {
                         store.set_head(&account, head.to_json()).await?;
                         debug!(account = %account.short(), seq = head.seq, "head stored");

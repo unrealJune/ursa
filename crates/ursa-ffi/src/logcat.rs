@@ -24,17 +24,13 @@ pub(crate) fn layer<S>() -> impl Layer<S> + Send + Sync
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
-    tracing_subscriber::fmt::layer()
-        .with_ansi(false)
-        .without_time()
-        .with_writer(Logcat)
-        .with_filter(
-            Targets::new()
-                .with_target("ursa_ffi", Level::INFO)
-                .with_target("ursa_client", Level::INFO)
-                .with_target("ursa_proto", Level::INFO)
-                .with_default(Level::WARN),
-        )
+    tracing_subscriber::fmt::layer().with_ansi(false).without_time().with_writer(Logcat).with_filter(
+        Targets::new()
+            .with_target("ursa_ffi", Level::INFO)
+            .with_target("ursa_client", Level::INFO)
+            .with_target("ursa_proto", Level::INFO)
+            .with_default(Level::WARN),
+    )
 }
 
 struct Logcat;
@@ -48,10 +44,7 @@ impl<'a> MakeWriter<'a> for Logcat {
     type Writer = Line;
 
     fn make_writer(&'a self) -> Line {
-        Line {
-            priority: 4,
-            text: Vec::new(),
-        }
+        Line { priority: 4, text: Vec::new() }
     }
 
     fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Line {
@@ -62,10 +55,7 @@ impl<'a> MakeWriter<'a> for Logcat {
             Level::DEBUG => 3,
             Level::TRACE => 2,
         };
-        Line {
-            priority,
-            text: Vec::new(),
-        }
+        Line { priority, text: Vec::new() }
     }
 }
 

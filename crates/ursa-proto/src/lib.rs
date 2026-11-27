@@ -37,14 +37,30 @@ pub const MAX_OBJECT: u64 = 32 << 20;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    Auth { cert: Box<DeviceCert> },
+    Auth {
+        cert: Box<DeviceCert>,
+    },
     Info,
-    Claim { code: String },
-    Grant { account: AccountId, quota_bytes: u64 },
-    Revoke { account: AccountId },
-    Put { id: ObjectId, len: u64 },
-    Get { id: ObjectId },
-    Has { ids: Vec<ObjectId> },
+    Claim {
+        code: String,
+    },
+    Grant {
+        account: AccountId,
+        quota_bytes: u64,
+    },
+    Revoke {
+        account: AccountId,
+    },
+    Put {
+        id: ObjectId,
+        len: u64,
+    },
+    Get {
+        id: ObjectId,
+    },
+    Has {
+        ids: Vec<ObjectId>,
+    },
     /// Deletes objects. With `older_than_ms`, only those last stored before then: an object
     /// someone has put (or put again) since is kept, so a sweep cannot race a writer.
     Delete {
@@ -61,7 +77,10 @@ pub enum Request {
     HeadGet,
     /// Stores `head` if the node's current head for the account has `expected_seq` (or there is
     /// none and `expected_seq` is `None`), and `head.seq` is greater.
-    HeadPut { head: Box<Head>, expected_seq: Option<u64> },
+    HeadPut {
+        head: Box<Head>,
+        expected_seq: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -276,9 +295,9 @@ impl NodeClient {
     /// a phone joining an account sat on its confirmation screen that way.
     async fn call(&self, req: &Request, body: Option<&[u8]>) -> Result<(Response, RecvStream)> {
         let limit = call_timeout(body.map_or(0, |b| b.len()));
-        tokio::time::timeout(limit, self.call_unbounded(req, body))
-            .await
-            .map_err(|_| anyhow!("node {} did not answer within {}s", self.conn.remote_id().fmt_short(), limit.as_secs()))?
+        tokio::time::timeout(limit, self.call_unbounded(req, body)).await.map_err(|_| {
+            anyhow!("node {} did not answer within {}s", self.conn.remote_id().fmt_short(), limit.as_secs())
+        })?
     }
 
     async fn call_unbounded(&self, req: &Request, body: Option<&[u8]>) -> Result<(Response, RecvStream)> {

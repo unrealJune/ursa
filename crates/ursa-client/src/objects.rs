@@ -49,7 +49,13 @@ pub(crate) fn codes_for(protection: Option<Code>, domains: usize) -> Result<(Cod
 impl Session {
     /// Codes `bytes` and puts shard `i` on `nodes[(rotate + i) % len]`, all in parallel. A node
     /// that refuses is replaced by the next unused one, if any.
-    pub(crate) async fn store_object(&self, bytes: &[u8], code: Code, nodes: &[NodeRef], rotate: usize) -> Result<ShardSet> {
+    pub(crate) async fn store_object(
+        &self,
+        bytes: &[u8],
+        code: Code,
+        nodes: &[NodeRef],
+        rotate: usize,
+    ) -> Result<ShardSet> {
         let shards = {
             let _t = Stage::start("code");
             coding::encode(code, bytes)
@@ -106,7 +112,11 @@ impl Session {
     }
 
     pub(crate) fn node_ref(&self, id: &str, state: &ursa_core::head::AccountState) -> NodeRef {
-        state.pool().into_iter().find(|n| n.id == id).unwrap_or(NodeRef { id: id.to_string(), ticket: None, label: String::new() })
+        state.pool().into_iter().find(|n| n.id == id).unwrap_or(NodeRef {
+            id: id.to_string(),
+            ticket: None,
+            label: String::new(),
+        })
     }
 
     /// Reads `k` shards (data shards first, so a healthy read needs no decoding), asking more
@@ -200,7 +210,12 @@ impl Session {
 
     /// Rebuilds the shards that are missing onto writable nodes not already holding one of this
     /// set. Returns the repaired set, or `None` if nothing was missing.
-    pub(crate) async fn repair_set(&self, id: &ObjectId, set: &ShardSet, writable: &[NodeRef]) -> Result<Option<ShardSet>> {
+    pub(crate) async fn repair_set(
+        &self,
+        id: &ObjectId,
+        set: &ShardSet,
+        writable: &[NodeRef],
+    ) -> Result<Option<ShardSet>> {
         let health = self.shard_health(set).await;
         if health.iter().all(|h| *h) {
             return Ok(None);
@@ -208,7 +223,8 @@ impl Session {
         let bytes = self.fetch_object(id, set).await?;
         let shards = coding::encode(set.code, &bytes);
         let mut out = set.clone();
-        let mut used: Vec<String> = set.shards.iter().zip(&health).filter(|(_, h)| **h).map(|(s, _)| s.node.clone()).collect();
+        let mut used: Vec<String> =
+            set.shards.iter().zip(&health).filter(|(_, h)| **h).map(|(s, _)| s.node.clone()).collect();
         for (pos, (s, ok)) in set.shards.iter().zip(&health).enumerate() {
             if *ok {
                 continue;

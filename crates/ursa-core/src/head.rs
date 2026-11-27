@@ -119,7 +119,13 @@ impl Head {
         let key = blake3::derive_key("ursa v1 head payload key", &material);
         let mut payload = nonce.to_vec();
         payload.extend_from_slice(&crate::crypto::seal_with(&key, &json, HEAD_AAD));
-        let mut head = Self { v: 1, account: account.public().clone(), seq, payload, sig: HybridSig { ed25519: vec![], ml_dsa: vec![] } };
+        let mut head = Self {
+            v: 1,
+            account: account.public().clone(),
+            seq,
+            payload,
+            sig: HybridSig { ed25519: vec![], ml_dsa: vec![] },
+        };
         head.sig = account.sign(HEAD_CONTEXT, &head.body());
         head
     }
@@ -195,7 +201,17 @@ fn is_zero_i64(v: &i64) -> bool {
 
 impl IndexEntry {
     pub fn new(added_ms: i64, at: Option<crate::manifest::ShardSet>) -> Self {
-        Self { added_ms, deleted: false, at, manifest: None, rev: 0, dir: None, name: None, placed_ms: 0, extra: BTreeMap::new() }
+        Self {
+            added_ms,
+            deleted: false,
+            at,
+            manifest: None,
+            rev: 0,
+            dir: None,
+            name: None,
+            placed_ms: 0,
+            extra: BTreeMap::new(),
+        }
     }
 
     /// The object holding this file's manifest.
@@ -261,7 +277,8 @@ impl LibraryIndex {
     }
 
     pub fn seal(&self, account: &Account) -> (ObjectId, Vec<u8>) {
-        let sealed = crate::crypto::seal_manifest_bytes_aad(account.root(), &serde_json::to_vec(self).expect("json"), INDEX_AAD);
+        let sealed =
+            crate::crypto::seal_manifest_bytes_aad(account.root(), &serde_json::to_vec(self).expect("json"), INDEX_AAD);
         (ObjectId::of(&sealed), sealed)
     }
 
@@ -315,7 +332,11 @@ mod tests {
     #[test]
     fn a_repaired_file_keeps_its_id_and_the_newest_placement_wins() {
         let file = ObjectId::of(b"file");
-        let set = |len| crate::manifest::ShardSet { code: crate::coding::Code::new(1, 3).unwrap(), sealed_len: len, shards: vec![] };
+        let set = |len| crate::manifest::ShardSet {
+            code: crate::coding::Code::new(1, 3).unwrap(),
+            sealed_len: len,
+            shards: vec![],
+        };
         let mut stale = LibraryIndex::default();
         stale.add(file, 1, Some(set(10)));
         let mut repaired = stale.clone();

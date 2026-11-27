@@ -122,7 +122,11 @@ impl Session {
     /// Deletes `candidates`, each only if its node has not had it put since `older_than_ms`.
     /// Returns how many went and their bytes, and the pieces whose node answered (deleted, kept
     /// as too new, or already gone).
-    pub(crate) async fn delete_pieces(&self, candidates: impl IntoIterator<Item = Piece>, older_than_ms: i64) -> (u64, u64, HashSet<Piece>) {
+    pub(crate) async fn delete_pieces(
+        &self,
+        candidates: impl IntoIterator<Item = Piece>,
+        older_than_ms: i64,
+    ) -> (u64, u64, HashSet<Piece>) {
         let mut by_node: HashMap<String, Vec<ObjectId>> = HashMap::new();
         for (n, id) in candidates {
             by_node.entry(n).or_default().push(id);
@@ -154,7 +158,9 @@ impl Session {
         let seen = self.seq().await;
         self.load_head().await?;
         if self.seq().await < seen {
-            bail!("the nodes that answered hold an older copy of the account than this device has seen; try again when they are all up");
+            bail!(
+                "the nodes that answered hold an older copy of the account than this device has seen; try again when they are all up"
+            );
         }
         Ok(())
     }
@@ -165,7 +171,9 @@ impl Session {
         self.fresh_head().await?;
         let cutoff = now_ms() - grace.as_millis() as i64;
         let Some((index, mut refs)) = self.referenced().await? else {
-            bail!("some files could not be read, so it is not safe to tell what is unused; try again when every node is up");
+            bail!(
+                "some files could not be read, so it is not safe to tell what is unused; try again when every node is up"
+            );
         };
         let mut report = GcReport::default();
 

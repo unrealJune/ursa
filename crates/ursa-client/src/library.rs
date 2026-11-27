@@ -280,7 +280,8 @@ impl Session {
     /// The live files' manifests (those that open), with the index they came from.
     pub(crate) async fn live_files(&self) -> Result<(LibraryIndex, Vec<(ObjectId, FileManifest)>)> {
         let idx = self.index().await?;
-        let live: Vec<(ObjectId, IndexEntry)> = idx.entries.iter().filter(|(_, e)| !e.deleted).map(|(i, e)| (*i, e.clone())).collect();
+        let live: Vec<(ObjectId, IndexEntry)> =
+            idx.entries.iter().filter(|(_, e)| !e.deleted).map(|(i, e)| (*i, e.clone())).collect();
         let files = stream::iter(live)
             .map(|(id, e)| async move { self.manifest(&id, &e).await.map(|m| (id, m)) })
             .buffer_unordered(8)
@@ -352,7 +353,12 @@ impl Session {
             .or_else(|| meta.path.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "untitled".into());
         let modified_ms = meta.modified_ms.unwrap_or_else(|| {
-            fmeta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or_else(now_ms)
+            fmeta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or_else(now_ms)
         });
 
         // Chunk and seal on a blocking thread; code and place on the network side.
@@ -428,7 +434,12 @@ impl Session {
         };
         let (id, sealed) = manifest::seal(self.account.root(), &m);
         let at = self.store_object(&sealed, small, &writable, rotate).await?;
-        self.pending.lock().expect("pending uploads").push(Staged { id, added_ms: m.added_ms, at, dir: meta.dir.clone() });
+        self.pending.lock().expect("pending uploads").push(Staged {
+            id,
+            added_ms: m.added_ms,
+            at,
+            dir: meta.dir.clone(),
+        });
         progress(total, total);
         Ok(Item { dir: meta.dir.clone(), ..Item::of(&id, &m) })
     }
@@ -570,7 +581,8 @@ impl Session {
         let writable = self.writable().await;
         let mut report = RepairReport::default();
         let idx = self.index().await?;
-        let live: Vec<(ObjectId, IndexEntry)> = idx.entries.iter().filter(|(_, e)| !e.deleted).map(|(i, e)| (*i, e.clone())).collect();
+        let live: Vec<(ObjectId, IndexEntry)> =
+            idx.entries.iter().filter(|(_, e)| !e.deleted).map(|(i, e)| (*i, e.clone())).collect();
         report.files = live.len();
         let mut moved: Vec<(ObjectId, ObjectId, ShardSet, i64)> = Vec::new();
         for (n, (id, entry)) in live.iter().enumerate() {
@@ -618,7 +630,11 @@ impl Session {
             // The file keeps its id; its entry points at the manifest's new place.
             self.change_index(move |idx| {
                 for (file, manifest, set, added) in &moved {
-                    idx.entries.entry(*file).or_insert_with(|| IndexEntry::new(*added, None)).replace(file, *manifest, set.clone());
+                    idx.entries.entry(*file).or_insert_with(|| IndexEntry::new(*added, None)).replace(
+                        file,
+                        *manifest,
+                        set.clone(),
+                    );
                 }
             })
             .await?;

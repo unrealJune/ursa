@@ -1,7 +1,7 @@
 //! Timings for one upload, download or index commit, logged as a single summary line when it
 //! ends, so telemetry shows where the time went: preparing, sealing, coding and placing shards,
 //! which node was slow and over which path. Never a file name, file id or shard id: node ids,
-//! sizes and times only (PLAN.md, Observability).
+//! sizes and times only (docs/design.md, Observability).
 //!
 //! The shard code records into the operation that is running through a task-local, so the
 //! object store needs no extra parameters and work outside an operation (repair, audits) records
@@ -45,11 +45,12 @@ pub(crate) struct Stats {
 impl Stats {
     /// Runs `f` with this operation's recorder in scope.
     pub(crate) async fn scope<F: std::future::Future>(self, f: F) -> (Self, F::Output) {
-        CURRENT.scope(self, async move {
-            let out = f.await;
-            (CURRENT.with(|s| s.take()), out)
-        })
-        .await
+        CURRENT
+            .scope(self, async move {
+                let out = f.await;
+                (CURRENT.with(|s| s.take()), out)
+            })
+            .await
     }
 
     fn take(&self) -> Stats {

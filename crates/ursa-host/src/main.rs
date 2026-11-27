@@ -47,7 +47,9 @@ enum Command {
         #[serde(default)]
         platform: Option<String>,
     },
-    Create { name: String },
+    Create {
+        name: String,
+    },
     Recover {
         #[serde(default)]
         phrase: Option<String>,
@@ -56,25 +58,43 @@ enum Command {
         #[serde(default)]
         passphrase: Option<String>,
     },
-    LinkJoin { code: String },
+    LinkJoin {
+        code: String,
+    },
     LinkOffer,
-    LinkDecide { accept: bool },
+    LinkDecide {
+        accept: bool,
+    },
     LinkCancel,
     Status,
     /// Re-reads the account from its nodes, then answers like `status`.
     Refresh,
     Pool,
-    Claim { link: String, #[serde(default)] label: String },
-    ForgetNode { node_id: String },
+    Claim {
+        link: String,
+        #[serde(default)]
+        label: String,
+    },
+    ForgetNode {
+        node_id: String,
+    },
     Invite,
-    Befriend { invite: String, #[serde(default = "default_quota_gb")] quota_gb: u64 },
+    Befriend {
+        invite: String,
+        #[serde(default = "default_quota_gb")]
+        quota_gb: u64,
+    },
     RecoveryPhrase,
-    KeyFile { passphrase: String },
+    KeyFile {
+        passphrase: String,
+    },
     List,
     /// Every folder and every file.
     Tree,
     /// Changes the tree in one library change; see `ursa_client::Edit`.
-    Edit { edits: Vec<ursa_client::Edit> },
+    Edit {
+        edits: Vec<ursa_client::Edit>,
+    },
     Upload(UploadMeta),
     /// Uploads without writing the index; `commit_uploads` writes every staged file in one change.
     UploadStaged(UploadMeta),
@@ -86,10 +106,20 @@ enum Command {
         dir: Option<String>,
     },
     /// Downloads a library folder and everything in it into `out_dir`.
-    DownloadFolder { folder_id: String, out_dir: PathBuf },
-    Thumb { file_id: String },
-    Download { file_id: String, out_path: PathBuf },
-    Delete { file_id: String },
+    DownloadFolder {
+        folder_id: String,
+        out_dir: PathBuf,
+    },
+    Thumb {
+        file_id: String,
+    },
+    Download {
+        file_id: String,
+        out_path: PathBuf,
+    },
+    Delete {
+        file_id: String,
+    },
     Repair,
     /// Everything the Pool and Usage screens show; `k`/`n` adds that shape to the choices.
     Storage {
@@ -106,7 +136,9 @@ enum Command {
         n: Option<u16>,
     },
     Recode,
-    SetGive { bytes: u64 },
+    SetGive {
+        bytes: u64,
+    },
     /// Deletes unreferenced pieces older than `grace_hours` (default 72).
     Gc {
         #[serde(default)]
@@ -265,7 +297,11 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
                 match device.open(root, &names.0, &names.1).await {
                     Ok(s) => *host.session.lock().await = Some(s),
                     // The app shows this and keeps the root: the account's nodes may be offline.
-                    Err(e) => return Ok(json!({ "device_id": device.id(), "has_account": false, "open_error": format!("{e:#}") })),
+                    Err(e) => {
+                        return Ok(
+                            json!({ "device_id": device.id(), "has_account": false, "open_error": format!("{e:#}") }),
+                        );
+                    }
                 }
             }
             host.status().await
@@ -425,7 +461,8 @@ async fn run(host: &Host, cmd: Command, out: &Out) -> Result<Value> {
             Ok(json!({ "report": r }))
         }
         Command::Gc { grace_hours } => {
-            let grace = grace_hours.map_or(ursa_client::gc::DEFAULT_GRACE, |h| std::time::Duration::from_secs_f64(h.max(0.0) * 3600.0));
+            let grace = grace_hours
+                .map_or(ursa_client::gc::DEFAULT_GRACE, |h| std::time::Duration::from_secs_f64(h.max(0.0) * 3600.0));
             Ok(json!({ "report": host.session().await?.collect_garbage(grace).await? }))
         }
         Command::SetGive { bytes } => {

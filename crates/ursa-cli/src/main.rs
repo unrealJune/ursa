@@ -177,7 +177,8 @@ async fn find(s: &Session, path: &str) -> Result<Option<Found>> {
     if let Some(f) = tree.folders.iter().find(|f| f.path.to_lowercase() == lower) {
         return Ok(Some(Found::Folder(Some(f.id.clone()))));
     }
-    let full = |i: &ursa_client::Item| if i.path.is_empty() { i.name.clone() } else { format!("{}/{}", i.path, i.name) };
+    let full =
+        |i: &ursa_client::Item| if i.path.is_empty() { i.name.clone() } else { format!("{}/{}", i.path, i.name) };
     Ok(tree.files.iter().find(|i| full(i).to_lowercase() == lower).map(|i| Found::File(i.file_id.clone())))
 }
 
@@ -192,7 +193,8 @@ fn save_root(profile: &Path, root: &AccountKey) -> Result<()> {
 }
 
 fn load_root(profile: &Path) -> Result<AccountKey> {
-    let phrase = std::fs::read_to_string(root_path(profile)).context("this profile has no account: create, recover or link-join first")?;
+    let phrase = std::fs::read_to_string(root_path(profile))
+        .context("this profile has no account: create, recover or link-join first")?;
     root_from_phrase(&phrase).map_err(|e| anyhow!("{e}"))
 }
 
@@ -308,7 +310,8 @@ async fn run(cli: &Cli, device: &Arc<Device>, platform: &str) -> Result<()> {
                 None => None,
             };
             for f in files {
-                let item = s.upload(UploadMeta { path: f.clone(), dir: dir.clone(), ..Default::default() }, |_, _| {}).await?;
+                let item =
+                    s.upload(UploadMeta { path: f.clone(), dir: dir.clone(), ..Default::default() }, |_, _| {}).await?;
                 println!("{}\t{}", item.file_id, item.name);
             }
         }
@@ -436,14 +439,19 @@ async fn run(cli: &Cli, device: &Arc<Device>, platform: &str) -> Result<()> {
                 bail!("this profile already has an account");
             }
             let linked = device
-                .join(code, &cli.device_name, platform, |c| eprintln!("Confirmation code: {c} (check it matches the other device)"))
+                .join(code, &cli.device_name, platform, |c| {
+                    eprintln!("Confirmation code: {c} (check it matches the other device)")
+                })
                 .await?;
             save_root(&cli.profile, &linked.root)?;
             // The CLI takes its relays from its flags each run; say so when the other device's differ.
             if let Some(n) = &linked.network
                 && !n.relays.is_empty()
             {
-                eprintln!("The other device uses these relays (pass them with --relay next time): {}", n.relays.join(", "));
+                eprintln!(
+                    "The other device uses these relays (pass them with --relay next time): {}",
+                    n.relays.join(", ")
+                );
             }
             println!("{}", linked.session.account_id());
         }

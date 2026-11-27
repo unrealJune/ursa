@@ -168,7 +168,10 @@ impl Store {
             }
             Self::S3 { store, .. } => {
                 let metas: Vec<_> = store.list(Some(&StorePath::from(prefix))).try_collect().await?;
-                Ok(metas.into_iter().map(|m| (m.location.to_string(), m.size, m.last_modified.timestamp_millis())).collect())
+                Ok(metas
+                    .into_iter()
+                    .map(|m| (m.location.to_string(), m.size, m.last_modified.timestamp_millis()))
+                    .collect())
             }
         }
     }
@@ -184,8 +187,10 @@ impl Store {
             match self {
                 Self::Disk { root } => {
                     let path = root.join(&key);
-                    tokio::task::spawn_blocking(move || std::fs::File::options().write(true).open(path)?.set_modified(std::time::SystemTime::now()))
-                        .await??;
+                    tokio::task::spawn_blocking(move || {
+                        std::fs::File::options().write(true).open(path)?.set_modified(std::time::SystemTime::now())
+                    })
+                    .await??;
                 }
                 // The same bytes again: a bucket has no cheaper way to refresh the time.
                 Self::S3 { .. } => self.put_raw(&key, bytes).await?,
@@ -218,12 +223,19 @@ impl Store {
     }
 
     /// The account's objects in id order, after `after`, at most `limit`.
-    pub async fn list(&self, account: &AccountId, after: Option<ObjectId>, limit: usize) -> Result<Vec<ursa_proto::StoredObject>> {
+    pub async fn list(
+        &self,
+        account: &AccountId,
+        after: Option<ObjectId>,
+        limit: usize,
+    ) -> Result<Vec<ursa_proto::StoredObject>> {
         let mut all: Vec<ursa_proto::StoredObject> = self
             .list_raw(&format!("objects/{account}"))
             .await?
             .into_iter()
-            .filter_map(|(key, len, stored_ms)| Some(ursa_proto::StoredObject { id: key.rsplit('/').next()?.parse().ok()?, len, stored_ms }))
+            .filter_map(|(key, len, stored_ms)| {
+                Some(ursa_proto::StoredObject { id: key.rsplit('/').next()?.parse().ok()?, len, stored_ms })
+            })
             .filter(|o| after.is_none_or(|a| o.id > a))
             .collect();
         all.sort_by_key(|o| o.id);
@@ -309,7 +321,11 @@ fn rand_suffix() -> String {
 }
 
 /// Recursive listing of a directory, keys relative to the store root.
-fn walk<'a>(dir: &'a Path, prefix: &'a str, out: &'a mut Vec<(String, u64, i64)>) -> futures_util::future::BoxFuture<'a, Result<()>> {
+fn walk<'a>(
+    dir: &'a Path,
+    prefix: &'a str,
+    out: &'a mut Vec<(String, u64, i64)>,
+) -> futures_util::future::BoxFuture<'a, Result<()>> {
     Box::pin(async move {
         let mut rd = match tokio::fs::read_dir(dir).await {
             Ok(d) => d,

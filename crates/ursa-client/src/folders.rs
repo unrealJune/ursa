@@ -44,7 +44,10 @@ pub enum Edit {
         parent: Option<String>,
         name: String,
     },
-    RenameFolder { id: String, name: String },
+    RenameFolder {
+        id: String,
+        name: String,
+    },
     MoveFolder {
         id: String,
         #[serde(default)]
@@ -56,13 +59,18 @@ pub enum Edit {
         #[serde(default)]
         only_folder: bool,
     },
-    RenameFile { file_id: String, name: String },
+    RenameFile {
+        file_id: String,
+        name: String,
+    },
     MoveFile {
         file_id: String,
         #[serde(default)]
         dir: Option<String>,
     },
-    DeleteFile { file_id: String },
+    DeleteFile {
+        file_id: String,
+    },
 }
 
 fn file_id(s: &str) -> Result<ObjectId> {
@@ -101,8 +109,12 @@ fn apply(idx: &mut LibraryIndex, edits: &[Edit], now: i64) {
                             break;
                         }
                     }
-                    let files: Vec<ObjectId> =
-                        idx.entries.iter().filter(|(_, e)| e.dir.as_ref().is_some_and(|d| gone.contains(d))).map(|(i, _)| *i).collect();
+                    let files: Vec<ObjectId> = idx
+                        .entries
+                        .iter()
+                        .filter(|(_, e)| e.dir.as_ref().is_some_and(|d| gone.contains(d)))
+                        .map(|(i, _)| *i)
+                        .collect();
                     for f in files {
                         idx.delete(f);
                     }
@@ -146,7 +158,12 @@ impl Session {
         let mut folders: Vec<FolderItem> = tree
             .folders
             .iter()
-            .map(|(id, f)| FolderItem { id: id.clone(), parent: f.parent.clone(), name: f.name.clone(), path: tree.folder_path(Some(id)) })
+            .map(|(id, f)| FolderItem {
+                id: id.clone(),
+                parent: f.parent.clone(),
+                name: f.name.clone(),
+                path: tree.folder_path(Some(id)),
+            })
             .collect();
         folders.sort_by_key(|f| f.path.to_lowercase());
         let files = tree
@@ -278,7 +295,12 @@ impl Session {
     /// Uploads a folder from this computer, everything in it, into `parent` (`None`: the root):
     /// its folders in one change, its files staged and written together. `progress` gets bytes.
     /// Returns the new folder's id and how many files went up.
-    pub async fn upload_folder(&self, local: &Path, parent: Option<String>, progress: impl Fn(u64, u64)) -> Result<(String, usize)> {
+    pub async fn upload_folder(
+        &self,
+        local: &Path,
+        parent: Option<String>,
+        progress: impl Fn(u64, u64),
+    ) -> Result<(String, usize)> {
         let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).context("that folder has no name")?;
         let (dirs, files) = {
             let local = local.to_path_buf();
@@ -301,7 +323,12 @@ impl Session {
         progress(0, total);
         for (n, (rel, len)) in files.iter().enumerate() {
             let dir = ids[rel.parent().unwrap_or(Path::new(""))].clone();
-            let meta = UploadMeta { path: local.join(rel), dir: Some(dir), mime: Some(guess_mime(&rel.to_string_lossy()).into()), ..Default::default() };
+            let meta = UploadMeta {
+                path: local.join(rel),
+                dir: Some(dir),
+                mime: Some(guess_mime(&rel.to_string_lossy()).into()),
+                ..Default::default()
+            };
             let base = done;
             self.upload_staged(meta, |d, _| progress(base + d, total)).await?;
             done += len;
@@ -383,8 +410,8 @@ fn walk(root: &Path) -> Result<(Vec<PathBuf>, Vec<(PathBuf, u64)>)> {
 
 /// Names Windows refuses as file names whatever the extension.
 const RESERVED: &[&str] = &[
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3",
-    "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2",
+    "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
 /// A library name as a file name on any system: what Windows refuses becomes `_`. Names made in

@@ -174,10 +174,7 @@ mod tests {
         let account = AccountKey::generate();
         let mut sealed = seal_chunk(&account, b"hello ursa");
         sealed.ciphertext[0] ^= 1;
-        assert!(matches!(
-            open_chunk(&sealed.id, &sealed.key, &sealed.ciphertext),
-            Err(Error::WrongContent { .. })
-        ));
+        assert!(matches!(open_chunk(&sealed.id, &sealed.key, &sealed.ciphertext), Err(Error::WrongContent { .. })));
         // Right id for the tampered bytes, so only the AEAD can catch it.
         let id = ObjectId::of(&sealed.ciphertext);
         assert!(matches!(open_chunk(&id, &sealed.key, &sealed.ciphertext), Err(Error::Decrypt)));

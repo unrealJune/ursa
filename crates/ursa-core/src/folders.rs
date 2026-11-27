@@ -142,8 +142,12 @@ impl Tree {
     /// Whether `name` is taken in `dir` by anything but `except`.
     pub fn taken(&self, dir: Option<&FolderId>, name: &str, except: Option<&str>) -> bool {
         let key = name_key(name);
-        self.folders.iter().any(|(id, f)| f.parent.as_ref() == dir && name_key(&f.name) == key && Some(id.as_str()) != except)
-            || self.files.iter().any(|(id, f)| f.dir.as_ref() == dir && name_key(&f.name) == key && Some(id.to_hex().as_str()) != except)
+        self.folders
+            .iter()
+            .any(|(id, f)| f.parent.as_ref() == dir && name_key(&f.name) == key && Some(id.as_str()) != except)
+            || self.files.iter().any(|(id, f)| {
+                f.dir.as_ref() == dir && name_key(&f.name) == key && Some(id.to_hex().as_str()) != except
+            })
     }
 
     /// The folder at `path` (`/`-separated, matching names ignoring case); `Some(None)` is the root.
@@ -169,10 +173,12 @@ fn numbered(name: &str, n: usize, is_dir: bool) -> String {
 impl LibraryIndex {
     /// Adds a folder or changes where it is and what it is called.
     pub fn place_folder(&mut self, id: &FolderId, parent: Option<FolderId>, name: &str, now_ms: i64) {
-        let f = self
-            .folders
-            .entry(id.clone())
-            .or_insert_with(|| Folder { parent: None, name: String::new(), changed_ms: 0, deleted: false });
+        let f = self.folders.entry(id.clone()).or_insert_with(|| Folder {
+            parent: None,
+            name: String::new(),
+            changed_ms: 0,
+            deleted: false,
+        });
         f.parent = parent;
         f.name = name.to_string();
         f.changed_ms = now_ms.max(f.changed_ms + 1);
@@ -216,8 +222,10 @@ impl LibraryIndex {
     pub fn tree(&self, manifest_name: impl Fn(&ObjectId) -> Option<String>) -> Tree {
         let live: HashMap<&FolderId, &Folder> = self.folders.iter().filter(|(_, f)| !f.deleted).collect();
         // A parent that is gone puts a folder at the root.
-        let mut parent: HashMap<&FolderId, Option<&FolderId>> =
-            live.iter().map(|(id, f)| (*id, f.parent.as_ref().and_then(|p| live.get_key_value(p).map(|(k, _)| *k)))).collect();
+        let mut parent: HashMap<&FolderId, Option<&FolderId>> = live
+            .iter()
+            .map(|(id, f)| (*id, f.parent.as_ref().and_then(|p| live.get_key_value(p).map(|(k, _)| *k))))
+            .collect();
         // Break cycles: the smallest id in each goes to the root.
         let ids: Vec<&FolderId> = {
             let mut v: Vec<&FolderId> = live.keys().copied().collect();
@@ -249,7 +257,13 @@ impl LibraryIndex {
         let mut children: BTreeMap<Option<&FolderId>, Vec<Sibling>> = BTreeMap::new();
         for id in &ids {
             let f = live[id];
-            children.entry(parent[id]).or_default().push((0, f.changed_ms, (*id).clone(), f.name.clone(), Node::Folder(id)));
+            children.entry(parent[id]).or_default().push((
+                0,
+                f.changed_ms,
+                (*id).clone(),
+                f.name.clone(),
+                Node::Folder(id),
+            ));
         }
         for (id, e) in self.entries.iter().filter(|(_, e)| !e.deleted) {
             let Some(name) = e.name.clone().or_else(|| manifest_name(id)) else { continue };

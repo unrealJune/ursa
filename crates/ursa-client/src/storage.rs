@@ -231,7 +231,8 @@ impl Session {
                 continue;
             }
             let used: u64 = infos.iter().map(|i| i.used_bytes).sum();
-            let up = infos.iter().filter_map(|i| i.up_30d).fold(None, |a: Option<f64>, u| Some(a.map_or(u, |a| a.max(u))));
+            let up =
+                infos.iter().filter_map(|i| i.up_30d).fold(None, |a: Option<f64>, u| Some(a.map_or(u, |a| a.max(u))));
             let gives_you = (!own).then(|| infos.iter().filter_map(|i| i.quota_bytes).max().unwrap_or(0));
             ups.push(up.unwrap_or(UNKNOWN_UP));
             if own {
@@ -242,11 +243,27 @@ impl Session {
                     let friends_used: u64 = i.grants.iter().map(|g| g.used_bytes).sum();
                     let reserved: u64 = i.grants.iter().map(|g| g.quota_bytes.saturating_sub(g.used_bytes)).sum();
                     for g in &i.grants {
-                        let name = state.friends.iter().find(|f| f.account == g.account).map(|f| f.name.clone()).unwrap_or_else(|| g.account.short());
-                        hosting.push(Hosted { name, account: g.account.to_string(), used_bytes: g.used_bytes, quota_bytes: g.quota_bytes });
+                        let name = state
+                            .friends
+                            .iter()
+                            .find(|f| f.account == g.account)
+                            .map(|f| f.name.clone())
+                            .unwrap_or_else(|| g.account.short());
+                        hosting.push(Hosted {
+                            name,
+                            account: g.account.to_string(),
+                            used_bytes: g.used_bytes,
+                            quota_bytes: g.quota_bytes,
+                        });
                     }
                     if let (Some(total), Some(free)) = (i.disk_total_bytes, i.disk_free_bytes) {
-                        disk = Some(Disk { total_bytes: total, free_bytes: free, yours_bytes: i.used_bytes, friends_bytes: friends_used, reserved_bytes: reserved });
+                        disk = Some(Disk {
+                            total_bytes: total,
+                            free_bytes: free,
+                            yours_bytes: i.used_bytes,
+                            friends_bytes: friends_used,
+                            reserved_bytes: reserved,
+                        });
                         own_cap = Some((free + i.used_bytes).saturating_sub(reserved));
                     }
                 }
@@ -276,10 +293,15 @@ impl Session {
         if let Some(c) = extra.and_then(|s| Code::new(s.k, s.n).ok()).filter(|c| c.n > c.k)
             && !choices.iter().any(|x| (x.k, x.n) == (c.k, c.n))
         {
-            choices.extend(capacity::choices(c, own_cap, &friend_caps, give, &ups).into_iter().filter(|x| (x.k, x.n) == (c.k, c.n)).map(|mut x| {
-                x.recommended = false;
-                x
-            }));
+            choices.extend(
+                capacity::choices(c, own_cap, &friend_caps, give, &ups)
+                    .into_iter()
+                    .filter(|x| (x.k, x.n) == (c.k, c.n))
+                    .map(|mut x| {
+                        x.recommended = false;
+                        x
+                    }),
+            );
         }
         let limit_bytes = capacity::limit(protection, own_cap, &friend_caps, give);
 
@@ -463,7 +485,11 @@ impl Session {
             }
             self.change_index(move |idx| {
                 for (file, manifest, set, added) in &moved {
-                    idx.entries.entry(*file).or_insert_with(|| IndexEntry::new(*added, None)).replace(file, *manifest, set.clone());
+                    idx.entries.entry(*file).or_insert_with(|| IndexEntry::new(*added, None)).replace(
+                        file,
+                        *manifest,
+                        set.clone(),
+                    );
                 }
             })
             .await?;
@@ -492,7 +518,13 @@ impl Session {
     /// Drops one reference to each piece; deletes the pieces nobody references any more (and
     /// that no new set reuses), unless a node has had them put since `started`. Returns how
     /// many were deleted. A node that cannot be reached keeps them for the sweep.
-    async fn release(&self, refs: &mut HashMap<Piece, usize>, kept: &HashSet<Piece>, released: Vec<Piece>, started: i64) -> usize {
+    async fn release(
+        &self,
+        refs: &mut HashMap<Piece, usize>,
+        kept: &HashSet<Piece>,
+        released: Vec<Piece>,
+        started: i64,
+    ) -> usize {
         let mut gone = Vec::new();
         for p in released {
             let r = refs.entry(p.clone()).or_insert(1);
@@ -520,7 +552,10 @@ fn growth(added: &[(i64, u64)], now: i64, months: usize) -> Vec<Month> {
         .map(|(y, m)| {
             let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
             let end = days_from_civil(ny, nm, 1) * 86_400_000;
-            Month { month: format!("{y:04}-{m:02}"), bytes: added.iter().filter(|(t, _)| *t < end).map(|(_, s)| s).sum() }
+            Month {
+                month: format!("{y:04}-{m:02}"),
+                bytes: added.iter().filter(|(t, _)| *t < end).map(|(_, s)| s).sum(),
+            }
         })
         .collect()
 }
@@ -586,7 +621,11 @@ mod tests {
     fn growth_is_cumulative_by_month() {
         let day = 86_400_000;
         let now = days_from_civil(2026, 11, 25) * day;
-        let added = [(days_from_civil(2026, 9, 3) * day, 10), (days_from_civil(2026, 11, 1) * day, 5), (days_from_civil(2025, 1, 1) * day, 1)];
+        let added = [
+            (days_from_civil(2026, 9, 3) * day, 10),
+            (days_from_civil(2026, 11, 1) * day, 5),
+            (days_from_civil(2025, 1, 1) * day, 1),
+        ];
         let g = growth(&added, now, 3);
         let got: Vec<_> = g.iter().map(|m| (m.month.as_str(), m.bytes)).collect();
         assert_eq!(got, vec![("2026-09", 11), ("2026-10", 11), ("2026-11", 16)]);

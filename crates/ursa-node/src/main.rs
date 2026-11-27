@@ -8,13 +8,13 @@ mod server;
 mod store;
 mod uptime;
 
-use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use iroh::{Endpoint, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr};
 use iroh::protocol::Router;
+use iroh::{Endpoint, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr};
 use tracing::info;
 use ursa_proto::{ALPN, ClaimLink, ticket_of};
 
@@ -82,8 +82,7 @@ async fn main() -> Result<()> {
             region: args.s3_region.clone(),
             prefix: args.s3_prefix.clone(),
             access_key_id: std::env::var("AWS_ACCESS_KEY_ID").context("AWS_ACCESS_KEY_ID is required")?,
-            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")
-                .context("AWS_SECRET_ACCESS_KEY is required")?,
+            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").context("AWS_SECRET_ACCESS_KEY is required")?,
         })?,
         other => return Err(anyhow!("unknown store {other:?}: use disk or s3")),
     };

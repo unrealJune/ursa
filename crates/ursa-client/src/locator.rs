@@ -6,8 +6,8 @@
 //! the friends' nodes that store its shards. Devices republish it whenever the head changes.
 
 use anyhow::{Context, Result, anyhow};
-use iroh::{Endpoint, SecretKey};
 use iroh::address_lookup::PkarrRelayClient;
+use iroh::{Endpoint, SecretKey};
 use iroh_dns::pkarr::SignedPacket;
 use ursa_core::account::Account;
 
@@ -28,7 +28,12 @@ fn client(endpoint: &Endpoint, relay: &url::Url) -> Result<PkarrRelayClient> {
     Ok(PkarrRelayClient::new(relay.clone(), endpoint.tls_config().clone(), dns))
 }
 
-pub async fn publish(endpoint: &Endpoint, relays: &[url::Url], account: &Account, node_ids: &[String]) -> Result<usize> {
+pub async fn publish(
+    endpoint: &Endpoint,
+    relays: &[url::Url],
+    account: &Account,
+    node_ids: &[String],
+) -> Result<usize> {
     if node_ids.is_empty() {
         return Ok(0);
     }

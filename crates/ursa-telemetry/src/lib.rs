@@ -46,9 +46,7 @@ impl Config {
     /// `OTEL_SERVICE_INSTANCE_ID` (else the host name, else "unknown") and
     /// `OTEL_SERVICE_VERSION` (else `version`: the app that starts a process knows its own).
     pub fn from_env(service: &str, layer: &str, version: &str) -> Option<Self> {
-        let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .ok()
-            .filter(|e| !e.trim().is_empty())?;
+        let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().filter(|e| !e.trim().is_empty())?;
         let instance_id = std::env::var("OTEL_SERVICE_INSTANCE_ID")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -59,13 +57,7 @@ impl Config {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| version.into());
-        Some(Self {
-            endpoint,
-            service: service.into(),
-            layer: layer.into(),
-            version,
-            instance_id,
-        })
+        Some(Self { endpoint, service: service.into(), layer: layer.into(), version, instance_id })
     }
 }
 
@@ -108,11 +100,7 @@ fn exported(m: &tracing::Metadata<'_>) -> bool {
     }
     let ours = target.starts_with("ursa");
     let level = *m.level();
-    if ours {
-        level <= Level::INFO
-    } else {
-        level <= Level::WARN
-    }
+    if ours { level <= Level::INFO } else { level <= Level::WARN }
 }
 
 /// Starts exporting. Returns false when telemetry was already configured in this process.
@@ -128,9 +116,7 @@ pub fn configure(cfg: Config) -> Result<bool> {
             // Its own roots, not the platform verifier: on Android that verifier needs a JNI
             // context the core does not have.
             .tls_certs_only(
-                webpki_root_certs::TLS_SERVER_ROOT_CERTS
-                    .iter()
-                    .filter_map(|c| reqwest::Certificate::from_der(c).ok()),
+                webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().filter_map(|c| reqwest::Certificate::from_der(c).ok()),
             )
             .timeout(Duration::from_secs(15))
             .build()
@@ -169,20 +155,13 @@ pub fn configure(cfg: Config) -> Result<bool> {
 /// `default_filter`), plus the collector when the environment names one ([`Config::from_env`]).
 pub fn init_console(default_filter: &str, to_stderr: bool, telemetry: Option<Config>) {
     use tracing_subscriber::prelude::*;
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| default_filter.into());
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default_filter.into());
     let console = if to_stderr {
-        tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
-            .boxed()
+        tracing_subscriber::fmt::layer().with_writer(std::io::stderr).boxed()
     } else {
         tracing_subscriber::fmt::layer().boxed()
     };
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(console)
-        .with(layer())
-        .init();
+    tracing_subscriber::registry().with(filter).with(console).with(layer()).init();
     if let Some(cfg) = telemetry
         && let Err(e) = configure(cfg)
     {

@@ -36,9 +36,7 @@ pub enum UrsaError {
 
 impl From<anyhow::Error> for UrsaError {
     fn from(e: anyhow::Error) -> Self {
-        Self::Failed {
-            message: format!("{e:#}"),
-        }
+        Self::Failed { message: format!("{e:#}") }
     }
 }
 
@@ -292,11 +290,7 @@ async fn run_logged<T: Send + 'static>(
     at: &'static std::panic::Location<'static>,
     with_message: bool,
 ) -> Res<T> {
-    let r = runtime()
-        .spawn(f)
-        .await
-        .map_err(|e| anyhow!("the core stopped mid-call: {e}"))
-        .and_then(|r| r);
+    let r = runtime().spawn(f).await.map_err(|e| anyhow!("the core stopped mid-call: {e}")).and_then(|r| r);
     if let Err(e) = &r {
         let call = format!("{}:{}", at.file(), at.line());
         if with_message {
@@ -315,10 +309,7 @@ fn init_logging() {
         {
             use tracing_subscriber::layer::SubscriberExt;
             use tracing_subscriber::util::SubscriberInitExt;
-            let _ = tracing_subscriber::registry()
-                .with(logcat::layer())
-                .with(ursa_telemetry::layer())
-                .try_init();
+            let _ = tracing_subscriber::registry().with(logcat::layer()).with(ursa_telemetry::layer()).try_init();
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -362,19 +353,11 @@ struct Inner {
 
 impl Inner {
     async fn device(&self) -> anyhow::Result<Arc<Device>> {
-        self.device
-            .lock()
-            .await
-            .clone()
-            .context("the core is not started")
+        self.device.lock().await.clone().context("the core is not started")
     }
 
     async fn session(&self) -> anyhow::Result<Arc<Session>> {
-        self.session
-            .lock()
-            .await
-            .clone()
-            .context("this device has no account yet")
+        self.session.lock().await.clone().context("this device has no account yet")
     }
 
     async fn adopt(&self, s: Arc<Session>) -> AccountKeys {
@@ -420,14 +403,7 @@ impl Inner {
                     this_device: d.device == me,
                 })
                 .collect(),
-            home_nodes: st
-                .home_nodes
-                .iter()
-                .map(|n| NodeEntry {
-                    id: n.id.clone(),
-                    label: n.label.clone(),
-                })
-                .collect(),
+            home_nodes: st.home_nodes.iter().map(|n| NodeEntry { id: n.id.clone(), label: n.label.clone() }).collect(),
             friends: st
                 .friends
                 .iter()
@@ -456,9 +432,7 @@ impl UrsaCore {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
         init_logging();
-        Arc::new(Self {
-            inner: Arc::new(Inner::default()),
-        })
+        Arc::new(Self { inner: Arc::new(Inner::default()) })
     }
 
     /// Starts this device's endpoint (its identity lives in `data_dir`) and, given the stored
@@ -482,15 +456,8 @@ impl UrsaCore {
             let device = match started {
                 Some(d) => d,
                 None => {
-                    let d = Device::start(
-                        &PathBuf::from(&data_dir),
-                        &NetConfig {
-                            relays,
-                            relay_token,
-                            pkarr: vec![],
-                        },
-                    )
-                    .await?;
+                    let d = Device::start(&PathBuf::from(&data_dir), &NetConfig { relays, relay_token, pkarr: vec![] })
+                        .await?;
                     *inner.device.lock().await = Some(d.clone());
                     d
                 }
@@ -515,12 +482,7 @@ impl UrsaCore {
     /// Starts sending the core's logs to an OTLP collector, as `ursa-android` / `core` with the
     /// app's telemetry id (the app's own JavaScript exports under the same id). Once per process;
     /// returns whether this call started it.
-    pub fn configure_telemetry(
-        &self,
-        endpoint: String,
-        instance_id: String,
-        version: String,
-    ) -> Res<bool> {
+    pub fn configure_telemetry(&self, endpoint: String, instance_id: String, version: String) -> Res<bool> {
         Ok(ursa_telemetry::configure(ursa_telemetry::Config {
             endpoint,
             service: "ursa-android".into(),
@@ -555,11 +517,7 @@ impl UrsaCore {
         let inner = self.inner.clone();
         on_rt(async move {
             let (dn, pf) = inner.names.lock().await.clone();
-            let s = inner
-                .device()
-                .await?
-                .create_account(name.trim(), &dn, &pf)
-                .await?;
+            let s = inner.device().await?.create_account(name.trim(), &dn, &pf).await?;
             Ok(inner.adopt(s).await)
         })
         .await
@@ -579,27 +537,20 @@ impl UrsaCore {
     pub async fn recover_key_file(&self, key_file: String, passphrase: String) -> Res<AccountKeys> {
         let inner = self.inner.clone();
         on_rt_secret(async move {
-            let account = KeyFile::from_json(&key_file)
-                .and_then(|kf| kf.open(&passphrase))
-                .map_err(|e| anyhow!("{e}"))?;
+            let account =
+                KeyFile::from_json(&key_file).and_then(|kf| kf.open(&passphrase)).map_err(|e| anyhow!("{e}"))?;
             open_root(&inner, account).await
         })
         .await
     }
 
     /// Joins the account behind a link code another device shows.
-    pub async fn link_join(
-        &self,
-        code: String,
-        listener: Arc<dyn JoinListener>,
-    ) -> Res<AccountKeys> {
+    pub async fn link_join(&self, code: String, listener: Arc<dyn JoinListener>) -> Res<AccountKeys> {
         let inner = self.inner.clone();
         on_rt_secret(async move {
             let (dn, pf) = inner.names.lock().await.clone();
             let device = inner.device().await?;
-            let linked = device
-                .join(&code, &dn, &pf, move |c| listener.on_confirm(c))
-                .await?;
+            let linked = device.join(&code, &dn, &pf, move |c| listener.on_confirm(c)).await?;
             // Joining may have restarted the device on the other device's relays.
             *inner.device.lock().await = Some(linked.session.device.clone());
             let mut keys = inner.adopt(linked.session).await;
@@ -637,12 +588,7 @@ impl UrsaCore {
     pub async fn link_decide(&self, accept: bool) -> Res<()> {
         let inner = self.inner.clone();
         on_rt(async move {
-            let tx = inner
-                .decision
-                .lock()
-                .await
-                .take()
-                .context("no device is waiting to join")?;
+            let tx = inner.decision.lock().await.take().context("no device is waiting to join")?;
             let _ = tx.send(accept);
             Ok(())
         })
@@ -698,15 +644,7 @@ impl UrsaCore {
     /// Claims a node with its `ursa-claim:` link; returns its id.
     pub async fn claim_node(&self, link: String, label: String) -> Res<String> {
         let inner = self.inner.clone();
-        on_rt_secret(async move {
-            Ok(inner
-                .session()
-                .await?
-                .claim_node(link.trim(), label.trim())
-                .await?
-                .id)
-        })
-        .await
+        on_rt_secret(async move { Ok(inner.session().await?.claim_node(link.trim(), label.trim()).await?.id) }).await
     }
 
     pub async fn forget_node(&self, node_id: String) -> Res<()> {
@@ -724,16 +662,8 @@ impl UrsaCore {
     pub async fn befriend(&self, invite: String, quota_gb: u64) -> Res<FriendInfo> {
         let inner = self.inner.clone();
         on_rt(async move {
-            let f = inner
-                .session()
-                .await?
-                .add_friend(invite.trim(), quota_gb * 1_000_000_000)
-                .await?;
-            Ok(FriendInfo {
-                account_id: f.account.to_string(),
-                name: f.name,
-                nodes: f.nodes.len() as u32,
-            })
+            let f = inner.session().await?.add_friend(invite.trim(), quota_gb * 1_000_000_000).await?;
+            Ok(FriendInfo { account_id: f.account.to_string(), name: f.name, nodes: f.nodes.len() as u32 })
         })
         .await
     }
@@ -751,26 +681,14 @@ impl UrsaCore {
                 bail!("use a passphrase of at least 8 characters");
             }
             let s = inner.session().await?;
-            Ok(KeyFile::create(&s.account, &passphrase)
-                .map_err(|e| anyhow!("{e}"))?
-                .to_json())
+            Ok(KeyFile::create(&s.account, &passphrase).map_err(|e| anyhow!("{e}"))?.to_json())
         })
         .await
     }
 
     pub async fn list(&self) -> Res<Vec<LibraryItem>> {
         let inner = self.inner.clone();
-        on_rt(async move {
-            Ok(inner
-                .session()
-                .await?
-                .list()
-                .await?
-                .into_iter()
-                .map(Into::into)
-                .collect())
-        })
-        .await
+        on_rt(async move { Ok(inner.session().await?.list().await?.into_iter().map(Into::into).collect()) }).await
     }
 
     /// Every folder and every file, with each file's folder.
@@ -800,47 +718,27 @@ impl UrsaCore {
     pub async fn edit(&self, edits_json: String) -> Res<Vec<String>> {
         let inner = self.inner.clone();
         on_rt(async move {
-            let edits: Vec<ursa_client::Edit> = serde_json::from_str(&edits_json).map_err(|e| anyhow!("bad edits: {e}"))?;
+            let edits: Vec<ursa_client::Edit> =
+                serde_json::from_str(&edits_json).map_err(|e| anyhow!("bad edits: {e}"))?;
             inner.session().await?.edit(edits).await
         })
         .await
     }
 
     /// Uploads a file and writes it into the library at once.
-    pub async fn upload(
-        &self,
-        request: UploadRequest,
-        listener: Arc<dyn ProgressListener>,
-    ) -> Res<LibraryItem> {
+    pub async fn upload(&self, request: UploadRequest, listener: Arc<dyn ProgressListener>) -> Res<LibraryItem> {
         let inner = self.inner.clone();
-        on_rt(async move {
-            Ok(inner
-                .session()
-                .await?
-                .upload(request.into(), throttled(listener))
-                .await?
-                .into())
-        })
-        .await
+        on_rt(async move { Ok(inner.session().await?.upload(request.into(), throttled(listener)).await?.into()) }).await
     }
 
     /// Uploads a file and leaves its library entry for `commit_uploads`, which writes any number
     /// in one index change. The file lists like any other meanwhile; it is only kept for good
     /// once a commit after it succeeds (a process that ends first loses it from the library).
-    pub async fn upload_staged(
-        &self,
-        request: UploadRequest,
-        listener: Arc<dyn ProgressListener>,
-    ) -> Res<LibraryItem> {
+    pub async fn upload_staged(&self, request: UploadRequest, listener: Arc<dyn ProgressListener>) -> Res<LibraryItem> {
         let inner = self.inner.clone();
-        on_rt(async move {
-            Ok(inner
-                .session()
-                .await?
-                .upload_staged(request.into(), throttled(listener))
-                .await?
-                .into())
-        })
+        on_rt(
+            async move { Ok(inner.session().await?.upload_staged(request.into(), throttled(listener)).await?.into()) },
+        )
         .await
     }
 
@@ -853,24 +751,10 @@ impl UrsaCore {
     /// The decrypted thumbnail's path, cached on this device.
     pub async fn thumb(&self, file_id: String) -> Res<String> {
         let inner = self.inner.clone();
-        on_rt(async move {
-            Ok(inner
-                .session()
-                .await?
-                .thumb(&file_id)
-                .await?
-                .to_string_lossy()
-                .into_owned())
-        })
-        .await
+        on_rt(async move { Ok(inner.session().await?.thumb(&file_id).await?.to_string_lossy().into_owned()) }).await
     }
 
-    pub async fn download(
-        &self,
-        file_id: String,
-        out_path: String,
-        listener: Arc<dyn ProgressListener>,
-    ) -> Res<()> {
+    pub async fn download(&self, file_id: String, out_path: String, listener: Arc<dyn ProgressListener>) -> Res<()> {
         let inner = self.inner.clone();
         on_rt(async move {
             inner
@@ -901,11 +785,7 @@ impl UrsaCore {
         let inner = self.inner.clone();
         on_rt(async move {
             let progress = throttled(listener);
-            let r = inner
-                .session()
-                .await?
-                .repair(move |d, t| progress(d as u64, t as u64))
-                .await?;
+            let r = inner.session().await?.repair(move |d, t| progress(d as u64, t as u64)).await?;
             Ok(RepairReport {
                 files: r.files as u64,
                 objects_checked: r.objects_checked as u64,
@@ -972,7 +852,8 @@ impl UrsaCore {
     pub async fn collect_garbage(&self, grace_hours: Option<f64>) -> Res<GcReport> {
         let inner = self.inner.clone();
         on_rt(async move {
-            let grace = grace_hours.map_or(ursa_client::gc::DEFAULT_GRACE, |h| Duration::from_secs_f64(h.max(0.0) * 3600.0));
+            let grace =
+                grace_hours.map_or(ursa_client::gc::DEFAULT_GRACE, |h| Duration::from_secs_f64(h.max(0.0) * 3600.0));
             let r = inner.session().await?.collect_garbage(grace).await?;
             Ok(GcReport {
                 nodes_swept: r.nodes_swept as u64,
@@ -1013,10 +894,6 @@ impl UrsaCore {
 
 async fn open_root(inner: &Inner, account: Account) -> anyhow::Result<AccountKeys> {
     let (dn, pf) = inner.names.lock().await.clone();
-    let s = inner
-        .device()
-        .await?
-        .open(account.root().clone(), &dn, &pf)
-        .await?;
+    let s = inner.device().await?.open(account.root().clone(), &dn, &pf).await?;
     Ok(inner.adopt(s).await)
 }
