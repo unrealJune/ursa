@@ -4,6 +4,8 @@ description = "An Ursa home node: stores encrypted objects (on disk or in S3) fo
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "ursa-node"

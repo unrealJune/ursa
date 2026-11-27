@@ -1,6 +1,7 @@
 {
   "name": "ursa-android",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "main": "expo-router/entry",
   "version": "0.1.0",
   "scripts": {

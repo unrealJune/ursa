@@ -4,6 +4,8 @@ description = "The Ursa device for mobile apps: ursa-client behind a UniFFI inte
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
+repository.workspace = true
 
 # cdylib: the libursa_ffi.so the Android app loads. lib: lets uniffi-bindgen and tests use it.
 [lib]

@@ -4,6 +4,8 @@ description = "ursa: an Ursa device on the command line (accounts, nodes, friend
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "ursa"

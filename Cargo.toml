@@ -2,12 +2,14 @@
 resolver = "3"
 members = ["crates/*"]
 # Each spike is its own throwaway project with its own lockfile.
-exclude = ["spikes"]
+exclude = ["docs/research"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "GPL-3.0-or-later"
+repository = "https://github.com/unrealJune/ursa"
 
 [workspace.dependencies]
 ursa-core = { path = "crates/ursa-core" }

@@ -5,3 +5,9 @@ type: application
 # CI sets both on publish: the release version, or 0.0.0-<sha> for a build between releases.
 version: 0.0.0
 appVersion: "0.0.0"
+home: https://github.com/unrealJune/ursa
+sources:
+  - https://github.com/unrealJune/ursa
+keywords: [ursa, backup, storage, iroh, encryption]
+annotations:
+  artifacthub.io/license: GPL-3.0-or-later
