@@ -1,0 +1,118 @@
+name: CI
+
+# The gate for every pull request and every push to main. The release workflows run only after
+# this passes on main (workflow_run), so nothing ships from a red commit. The heavy product
+# builds (the APK, the Windows installers, the node image) run in their own release-* workflows,
+# which also build pull requests that touch them.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - run: cargo fmt --all --check
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
+  # The Windows host is the one crate built for Windows; clippy there catches what Linux can't.
+  rust-windows:
+    name: Rust (Windows host)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-ci
+      - run: cargo clippy --locked -p ursa-host --all-targets -- -D warnings
+
+  android:
+    name: Android app (types and lint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bunx eslint src modules/ursa-core/index.ts
+
+  windows:
+    name: Windows app (build)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: apps/windows/global.json
+      # The host is not needed to compile the app (the csproj copies it only when it exists).
+      - working-directory: apps/windows/Ursa.App
+        run: dotnet build -c Release -r win-x64 -p:Platform=x64 -warnaserror
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint and render both stores
+        run: |
+          set -euo pipefail
+          helm lint charts/ursa-node --strict --set existingSecret=x --set s3.endpoint=http://s3:8333
+          helm template t charts/ursa-node --set existingSecret=x --set s3.endpoint=http://s3:8333 > /dev/null
+          helm template t charts/ursa-node --set existingSecret=x --set store=disk --set persistence.enabled=true \
+            --set service.enabled=true > /dev/null
+
+  workflows:
+    name: Workflows and scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint (and shellcheck on every run step)
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+      - run: shellcheck scripts/*.sh apps/android/scripts/*.sh
+      - run: bash scripts/test-next-version.sh
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The whole history on main, only the new commits on a pull request.
+      - name: gitleaks
+        env:
+          RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || '' }}
+        run: |
+          set -euo pipefail
+          opts=(--redact --verbose --exit-code 1)
+          if [[ -n "$RANGE" ]]; then opts+=("--log-opts=$RANGE"); fi
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git /repo "${opts[@]}"

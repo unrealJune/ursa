@@ -1,15 +1,15 @@
 name: Release / Android app
 
 # Builds the Ursa Android app: the Rust core (crate ursa-ffi) for arm64-v8a and x86_64 with its
-# Kotlin bindings, then the Expo app around it (prebuild + Gradle), into one APK. A push to main
-# that touches the app or the core cuts `android-vX.Y.Z` when its Conventional Commits ship
-# something (scripts/next-version.sh android) and attaches the APK to that GitHub release. Other
-# builds keep the APK as a workflow artifact.
+# Kotlin bindings, then the Expo app around it (prebuild + Gradle), into one APK. Once CI passes
+# on a push to main, the commit it tested cuts `android-vX.Y.Z` when its Conventional Commits ship
+# something (scripts/next-version.sh android) and the APK is attached to that GitHub release.
+# Other builds keep the APK as a workflow artifact.
 #
 # Caches: GitHub lets a run read caches saved on its own ref, its base branch or the default
 # branch. Two kinds of saving, then:
-# - Warming: every push to main or android-app builds and saves, so a new pull request's first
-#   build starts from its base branch instead of from nothing.
+# - Warming: every push to main (after CI) or android-app that touches the app builds and saves,
+#   so a new pull request's first build starts from its base branch instead of from nothing.
 # - Iteration: pull requests save too. Those entries are readable by that pull request alone, and
 #   its next push restores them first (a restore looks in the run's own ref before the base), so
 #   only what changed since its last push is rebuilt. cache-cleanup.yml deletes them when the pull
@@ -22,10 +22,9 @@ name: Release / Android app
 # debug key. Android only installs an update signed by the same key as the installed app.
 
 on:
+  # android-app (where the app lives until it merges) only warms the caches its pull requests read.
   push:
-    # main releases; android-app (where the app lives until it merges) only warms the caches its
-    # pull requests read.
-    branches: [main, android-app]
+    branches: [android-app]
     paths:
       - apps/android/**
       - crates/**
@@ -42,6 +41,11 @@ on:
       - crates/ursa-core/**
       - crates/ursa-proto/**
       - .github/workflows/release-android.yml
+  # main releases, once CI has passed on the push.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       bump:
@@ -57,16 +61,25 @@ concurrency:
   group: release-android-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # The commit to build: the one CI passed on, or the event's own.
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
 jobs:
   version:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
     outputs:
+      build: ${{ steps.ver.outputs.build }}
       release: ${{ steps.ver.outputs.release }}
       version: ${{ steps.ver.outputs.version }}
       tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.SHA }}
           fetch-depth: 0
       - id: ver
         env:
@@ -78,8 +91,16 @@ jobs:
           release="$(sed -n 's/^release=//p' <<<"$out")"
           version="$(sed -n 's/^version=//p' <<<"$out")"
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then release=false; fi
+          # After CI on main: build to release, or to warm main's caches when the push touched
+          # the app (the paths filter the other triggers use).
+          build=true
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" && "$release" != "true" ]] &&
+            git diff --quiet "HEAD^1" HEAD -- apps/android crates Cargo.toml Cargo.lock .cargo; then
+            build=false
+          fi
           if [[ "$release" != "true" ]]; then version="${version}-ci.${GITHUB_RUN_NUMBER}"; fi
           {
+            echo "build=${build}"
             echo "release=${release}"
             echo "version=${version}"
             echo "tag=$(sed -n 's/^tag=//p' <<<"$out")"
@@ -87,6 +108,7 @@ jobs:
 
   build:
     needs: version
+    if: needs.version.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
@@ -94,7 +116,9 @@ jobs:
       URSA_VERSION_CODE: ${{ github.run_number }}
       # Developer telemetry: the JS layer and the Rust core send their logs as OTLP to the
       # collector this repository variable names (src/core/telemetry.ts). Unset sends nothing.
+      # Releases send nothing until the user turns diagnostics on; test builds start with it on.
       EXPO_PUBLIC_OTEL_ENDPOINT: ${{ vars.OTEL_ENDPOINT }}
+      EXPO_PUBLIC_TELEMETRY_DEFAULT: ${{ needs.version.outputs.release == 'true' && 'off' || 'on' }}
       # Anything but main builds for a test phone: arm64 only (x86_64 is for emulators and doubled
       # both the Rust and the C++ work) and no R8. Releases ship both ABIs, shrunk.
       FAST: ${{ github.ref != 'refs/heads/main' }}
@@ -104,6 +128,8 @@ jobs:
       GRADLE_OPTS: -Dorg.gradle.caching=true -Dorg.gradle.parallel=true -Dorg.gradle.jvmargs=-Xmx5g
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
 
       # A hosted runner's root disk has ~20 GB free, and this job fills it from both ends: the
       # restored caches (Cargo target, Gradle, ccache) and then the Rust core, the CMake trees and
@@ -138,6 +164,14 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           echo "rustc=$(rustc -V | tr -cs 'A-Za-z0-9.' '-')" >> "$GITHUB_OUTPUT"
+      # The core bakes the default relay token in at build time (crates/ursa-proto/src/relays.rs), so
+      # a cached core is only good for the token it was built with. A short hash names it in the
+      # cache key without revealing it; pull requests from forks get no secret and build without.
+      - name: Relay token fingerprint
+        id: token
+        env:
+          URSA_RELAY_TOKEN: ${{ secrets.URSA_RELAY_TOKEN }}
+        run: echo "fp=$(printf '%s' "$URSA_RELAY_TOKEN" | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
 
       # The built core: the library and its bindings, together (UniFFI aborts at load when the
       # two disagree, so neither is ever restored without the other). Keyed by everything the
@@ -151,7 +185,7 @@ jobs:
           path: |
             apps/android/modules/ursa-core/android/src/main/jniLibs
             apps/android/modules/ursa-core/android/src/main/java/uniffi
-          key: ursa-core-${{ steps.rust.outputs.rustc }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh') }}-${{ env.ABIS }}
+          key: ursa-core-${{ steps.rust.outputs.rustc }}-${{ steps.token.outputs.fp }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'apps/android/scripts/build-core.sh') }}-${{ env.ABIS }}
 
       - name: Rust targets
         if: steps.core.outputs.cache-hit != 'true'
@@ -171,6 +205,8 @@ jobs:
           tool: cargo-ndk
       - name: Build the core and its Kotlin bindings
         if: steps.core.outputs.cache-hit != 'true'
+        env:
+          URSA_DEFAULT_RELAY_TOKEN: ${{ secrets.URSA_RELAY_TOKEN }}
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           # shellcheck disable=SC2086
@@ -366,7 +402,8 @@ jobs:
       - name: Check the core shipped
         run: |
           set -euo pipefail
-          apk="$(ls apps/android/android/app/build/outputs/apk/release/*.apk | head -n 1)"
+          apks=(apps/android/android/app/build/outputs/apk/release/*.apk)
+          apk="${apks[0]}"
           unzip -l "$apk" | grep -q 'lib/arm64-v8a/libursa_ffi.so'
           mkdir -p dist
           cp "$apk" "dist/Ursa-${URSA_VERSION}.apk"
@@ -385,6 +422,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: ursa-android
@@ -395,5 +435,11 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" dist/*.apk --target "$GITHUB_SHA" --title "Ursa for Android ${VERSION}" \
-            --notes "Preview APK (arm64 phones and x86_64 emulators). Install it from the file; updates are not automatic."
+          {
+            bash scripts/next-version.sh android --notes
+            echo "### Install"
+            echo
+            echo "Download \`Ursa-${VERSION}.apk\` on your phone and open it (arm64 phones; x86_64 for emulators)."
+            echo "Updates are not automatic yet: install the next APK over this one."
+          } > notes.md
+          gh release create "$TAG" dist/*.apk --target "$SHA" --title "Ursa for Android ${VERSION}" --notes-file notes.md

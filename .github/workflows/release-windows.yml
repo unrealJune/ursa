@@ -1,28 +1,32 @@
 name: Release / Windows app
 
 # Builds the Ursa Windows app (WinUI 3 + the Rust ursa-host beside it) for x64 and ARM64 and
-# packages it with Velopack (install/uninstall; updates are off for now, so no feed is
-# published). A push to main that touches the app or the core cuts `windows-vX.Y.Z` when its
-# Conventional Commits ship something (scripts/next-version.sh windows), and attaches the
-# installers to that GitHub release. Other builds keep the installers as workflow artifacts.
+# packages it with Velopack. When the Conventional Commits since the last `windows-v*` tag ship
+# something (scripts/next-version.sh windows), it publishes `windows-vX.Y.Z` on GitHub Releases:
+#
+#   Ursa-X.Y.Z-<arch>-Setup.exe / -Portable.zip      what people download
+#   releases.win-<arch>.json, RELEASES-win-<arch>     the update feed per architecture
+#   Ursa-X.Y.Z-win-<arch>-full.nupkg (and -delta)     what installed copies update to
+#
+# Installed copies read that feed (apps/windows/Ursa.App/Services/Updater.cs) and find the
+# release by its title, "Ursa for Windows X.Y.Z": keep the two in step.
+#
+# A push to main releases only after CI passes on it, and from the commit CI tested. Pull requests
+# that touch the app build the installers as workflow artifacts. A manual run can force a bump.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - apps/windows/**
-      - crates/**
-      - Cargo.toml
-      - Cargo.lock
-      - .cargo/**
-      - scripts/next-version.sh
-      - .github/workflows/release-windows.yml
   pull_request:
     paths:
       - apps/windows/**
       - crates/ursa-host/**
+      - crates/ursa-client/**
       - crates/ursa-core/**
       - crates/ursa-proto/**
+      - .github/workflows/release-windows.yml
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       bump:
@@ -38,16 +42,24 @@ concurrency:
   group: release-windows-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
 jobs:
   version:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
     outputs:
+      build: ${{ steps.ver.outputs.build }}
       release: ${{ steps.ver.outputs.release }}
       version: ${{ steps.ver.outputs.version }}
       tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.SHA }}
           fetch-depth: 0
       - id: ver
         env:
@@ -59,9 +71,12 @@ jobs:
           release="$(sed -n 's/^release=//p' <<<"$out")"
           version="$(sed -n 's/^version=//p' <<<"$out")"
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then release=false; fi
+          build=true
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" && "$release" != "true" ]]; then build=false; fi
           # Builds that are not releases still need a version Velopack accepts.
           if [[ "$release" != "true" ]]; then version="${version}-ci.${GITHUB_RUN_NUMBER}"; fi
           {
+            echo "build=${build}"
             echo "release=${release}"
             echo "version=${version}"
             echo "tag=$(sed -n 's/^tag=//p' <<<"$out")"
@@ -69,6 +84,7 @@ jobs:
 
   build:
     needs: version
+    if: needs.version.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -79,68 +95,106 @@ jobs:
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      RELEASE: ${{ needs.version.outputs.release }}
+      CHANNEL: win-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
       - name: Rust
         shell: bash
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-${{ matrix.arch }}
+      # The default relay token is baked into the host (crates/ursa-proto/src/relays.rs). Cargo
+      # rebuilds when it changes; pull requests from forks get no secret and build without.
       - name: Build ursa-host
+        env:
+          URSA_DEFAULT_RELAY_TOKEN: ${{ secrets.URSA_RELAY_TOKEN }}
         run: cargo build --release --locked -p ursa-host
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: apps/windows/global.json
+      # Diagnostics stay off in releases until the user turns them on; test builds start with
+      # them on (Services/Telemetry.cs).
       - name: Publish the app
+        shell: bash
         working-directory: apps/windows/Ursa.App
-        run: >
-          dotnet publish -c Release -r ${{ matrix.rid }} -p:Platform=${{ matrix.platform }}
-          -p:Version=${{ env.VERSION }} -p:UrsaOtelEndpoint=${{ vars.OTEL_ENDPOINT }} -o ${{ runner.temp }}/publish
+        env:
+          OTEL_ENDPOINT: ${{ vars.OTEL_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          default=on
+          if [[ "$RELEASE" == "true" ]]; then default=off; fi
+          dotnet publish -c Release -r ${{ matrix.rid }} -p:Platform=${{ matrix.platform }} \
+            -p:Version="$VERSION" -p:UrsaOtelEndpoint="$OTEL_ENDPOINT" -p:UrsaTelemetryDefault="$default" \
+            -o "$RUNNER_TEMP/publish"
       - name: Check the host shipped
         shell: bash
         run: test -f "${RUNNER_TEMP}/publish/ursa-host.exe"
       - name: Package with Velopack
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          dotnet tool install -g vpk
+          dotnet tool install -g vpk --version 1.2.161
+          # The previous release's package, so this one also ships a delta (a few MB instead
+          # of the whole app). The first release with a feed has nothing to diff against.
+          if [[ "$RELEASE" == "true" ]]; then
+            vpk download github --repoUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" --token "$GH_TOKEN" \
+              --channel "$CHANNEL" --outputDir "$RUNNER_TEMP/releases" ||
+              echo "::notice::No earlier $CHANNEL release to build a delta from."
+          fi
           vpk pack --packId Ursa --packVersion "$VERSION" --packDir "$RUNNER_TEMP/publish" \
-            --mainExe Ursa.exe --packTitle Ursa --icon apps/windows/Ursa.App/Assets/ursa.ico \
-            --channel win-${{ matrix.arch }} --outputDir "$RUNNER_TEMP/releases"
+            --mainExe Ursa.exe --packTitle Ursa --packAuthors "Ursa contributors" \
+            --icon apps/windows/Ursa.App/Assets/ursa.ico --channel "$CHANNEL" --outputDir "$RUNNER_TEMP/releases"
           ls -la "$RUNNER_TEMP/releases"
+          # Only what this version adds: an earlier package downloaded for the delta stays in
+          # its own release.
+          mkdir -p "$RUNNER_TEMP/upload"
+          cd "$RUNNER_TEMP/releases"
+          cp "Ursa-${CHANNEL}-Setup.exe" "$RUNNER_TEMP/upload/Ursa-${VERSION}-${{ matrix.arch }}-Setup.exe"
+          cp "Ursa-${CHANNEL}-Portable.zip" "$RUNNER_TEMP/upload/Ursa-${VERSION}-${{ matrix.arch }}-Portable.zip"
+          cp "Ursa-${VERSION}-${CHANNEL}-"*.nupkg "releases.${CHANNEL}.json" "assets.${CHANNEL}.json" "RELEASES-${CHANNEL}" \
+            "$RUNNER_TEMP/upload/"
+          ls -la "$RUNNER_TEMP/upload"
       - uses: actions/upload-artifact@v4
         with:
           name: ursa-windows-${{ matrix.arch }}
-          path: ${{ runner.temp }}/releases
+          path: ${{ runner.temp }}/upload
 
   release:
     needs: [version, build]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          path: dist
+          pattern: ursa-windows-*
+          path: upload
+          merge-multiple: true
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.version.outputs.tag }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p upload
-          for arch in x64 arm64; do
-            for f in dist/ursa-windows-$arch/*; do
-              name="$(basename "$f")"
-              case "$name" in
-                *Setup.exe) cp "$f" "upload/Ursa-${VERSION}-${arch}-Setup.exe" ;;
-                *Portable.zip) cp "$f" "upload/Ursa-${VERSION}-${arch}-Portable.zip" ;;
-              esac
-            done
-          done
           ls -la upload
-          gh release create "$TAG" upload/* --target "$GITHUB_SHA" --title "Ursa for Windows ${VERSION}" \
-            --notes "Unsigned preview. Installers for x64 and ARM64; updates are not automatic yet."
+          {
+            bash scripts/next-version.sh windows --notes
+            echo "### Install"
+            echo
+            echo "Download \`Ursa-${VERSION}-x64-Setup.exe\` (or \`-arm64-\` for ARM PCs) and run it. Ursa installs"
+            echo "for your user, without admin rights, and updates itself from here. The installers are"
+            echo "not code-signed yet, so SmartScreen will warn the first time."
+          } > notes.md
+          gh release create "$TAG" upload/* --target "$SHA" --title "Ursa for Windows ${VERSION}" --notes-file notes.md

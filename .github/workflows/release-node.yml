@@ -1,15 +1,18 @@
 name: Release / node
 
-# Every push to main that touches the node builds and publishes it:
-#   image  ghcr.io/<owner>/ursa-node  :latest, :sha-<commit>, and :X.Y.Z + :X.Y on a release
-#   chart  oci://ghcr.io/<owner>/charts/ursa-node  0.0.0-<commit>, and X.Y.Z on a release
-# A release happens when the Conventional Commits since the last `node-v*` tag ship something
-# (scripts/next-version.sh); the workflow then pushes the tag. Deployments that follow the chart
-# with a semver range (Buttercup's HelmRelease) pick a release up on their own.
+# Builds the node's image (linux/amd64 and linux/arm64) and its Helm chart, and publishes both
+# when the Conventional Commits since the last `node-v*` tag ship something
+# (scripts/next-version.sh node):
+#   image  ghcr.io/<owner>/ursa-node               :X.Y.Z, :X.Y, :X (from 1.0), :latest, :sha-<commit>
+#   chart  oci://ghcr.io/<owner>/charts/ursa-node  X.Y.Z
+# and a `node-vX.Y.Z` GitHub release with the notes and the packaged chart. Deployments that
+# follow the chart with a semver range (a Flux HelmRelease, Renovate) pick a release up on their own.
+#
+# A push to main releases only after CI passes on it, and from the commit CI tested. Pull requests
+# that touch the node build the amd64 image without pushing it. A manual run can force a bump.
 
 on:
-  push:
-    branches: [main]
+  pull_request:
     paths:
       - crates/**
       - Cargo.toml
@@ -17,15 +20,11 @@ on:
       - .cargo/**
       - docker/node.Dockerfile
       - charts/ursa-node/**
-      - scripts/next-version.sh
       - .github/workflows/release-node.yml
-  pull_request:
-    paths:
-      - crates/**
-      - Cargo.toml
-      - Cargo.lock
-      - charts/ursa-node/**
-      - docker/node.Dockerfile
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       bump:
@@ -37,38 +36,33 @@ on:
 permissions:
   contents: read
 
+# Releases move tags, so they queue rather than overlap or cancel.
 concurrency:
   group: release-node-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
+  # The commit to build: the one CI passed on, or the event's own.
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
-  test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --workspace
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - uses: azure/setup-helm@v4
-      - run: helm lint charts/ursa-node --set existingSecret=x --set s3.endpoint=http://s3:8333
-
   version:
-    needs: test
-    if: github.event_name != 'pull_request'
+    # From CI: only a green run on a push to main.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
     outputs:
-      short: ${{ steps.ver.outputs.short }}
+      build: ${{ steps.ver.outputs.build }}
       release: ${{ steps.ver.outputs.release }}
       version: ${{ steps.ver.outputs.version }}
       tag: ${{ steps.ver.outputs.tag }}
+      short: ${{ steps.ver.outputs.short }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.SHA }}
           fetch-depth: 0
       - id: ver
         env:
@@ -79,31 +73,115 @@ jobs:
           echo "$out"
           release="$(sed -n 's/^release=//p' <<<"$out")"
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then release=false; fi
+          # Main builds only what it releases; pull requests and manual runs always build.
+          build=true
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" && "$release" != "true" ]]; then build=false; fi
           {
-            echo "short=$(git rev-parse --short HEAD)"
+            echo "build=${build}"
             echo "release=${release}"
             echo "version=$(sed -n 's/^version=//p' <<<"$out")"
             echo "tag=$(sed -n 's/^tag=//p' <<<"$out")"
+            echo "short=$(git rev-parse --short HEAD)"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### ursa-node"
             if [[ "$release" == "true" ]]; then
               echo "Release **$(sed -n 's/^tag=//p' <<<"$out")** ($(sed -n 's/^level=//p' <<<"$out"))."
+            elif [[ "$build" == "true" ]]; then
+              echo "No release: building \`sha-$(git rev-parse --short HEAD)\` only."
             else
-              echo "No release: nothing that ships since the last node tag. Publishing \`sha-$(git rev-parse --short HEAD)\` only."
+              echo "No release: nothing that ships since the last node tag."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # One native runner per architecture (Rust under QEMU takes the better part of an hour), each
+  # pushing its image by digest; `manifest` joins them under the tags.
   image:
     needs: version
-    runs-on: ubuntu-24.04
+    if: needs.version.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"arch":"amd64","runner":"ubuntu-24.04"}]' || '[{"arch":"amd64","runner":"ubuntu-24.04"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]') }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@v4
-      - id: tags
+        with:
+          ref: ${{ env.SHA }}
+      - run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/ursa-node" >> "$GITHUB_ENV"
+      # The default relay token goes in as a BuildKit secret (no layer or build arg holds it); a
+      # short hash of it makes a new token rebuild rather than reuse a cached binary.
+      - id: token
+        env:
+          URSA_RELAY_TOKEN: ${{ secrets.URSA_RELAY_TOKEN }}
+        run: echo "fp=$(printf '%s' "$URSA_RELAY_TOKEN" | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - if: env.PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/node.Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          secrets: |
+            relay_token=${{ secrets.URSA_RELAY_TOKEN }}
+          build-args: |
+            RELAY_TOKEN_ID=${{ steps.token.outputs.fp }}
+          outputs: ${{ env.PUSH == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=cacheonly' }}
+          labels: |
+            org.opencontainers.image.title=ursa-node
+            org.opencontainers.image.description=Ursa storage node: encrypted object storage over iroh
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SHA }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.licenses=GPL-3.0-or-later
+          cache-from: type=gha,scope=ursa-node-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ursa-node-${{ matrix.arch }}
+      - if: env.PUSH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - if: env.PUSH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+
+  manifest:
+    needs: [version, image]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag the multi-arch image
         env:
           SHORT: ${{ needs.version.outputs.short }}
           RELEASE: ${{ needs.version.outputs.release }}
@@ -111,33 +189,27 @@ jobs:
         run: |
           set -euo pipefail
           image="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/ursa-node"
-          tags=("${image}:latest" "${image}:sha-${SHORT}")
+          tags=("${image}:sha-${SHORT}")
           if [[ "$RELEASE" == "true" ]]; then
-            tags+=("${image}:${VERSION}" "${image}:${VERSION%.*}")
+            tags+=("${image}:${VERSION}" "${image}:${VERSION%.*}" "${image}:latest")
+            # A bare major only means something once it is stable.
+            if [[ "${VERSION%%.*}" != 0 ]]; then tags+=("${image}:${VERSION%%.*}"); fi
           fi
-          (IFS=,; echo "tags=${tags[*]}") >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/node.Dockerfile
-          push: true
-          platforms: linux/amd64
-          tags: ${{ steps.tags.outputs.tags }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.description=Ursa home node: encrypted object storage over iroh
-          cache-from: type=gha,scope=ursa-node
-          cache-to: type=gha,mode=max,scope=ursa-node
+          args=()
+          for t in "${tags[@]}"; do args+=(--tag "$t"); done
+          for d in "$RUNNER_TEMP"/digests/*; do args+=("${image}@sha256:$(basename "$d")"); done
+          # GHCR shows the index's annotations on the package page and links it to this repository.
+          docker buildx imagetools create "${args[@]}" \
+            --annotation "index:org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --annotation "index:org.opencontainers.image.description=Ursa storage node: encrypted object storage over iroh" \
+            --annotation "index:org.opencontainers.image.licenses=GPL-3.0-or-later"
+          docker buildx imagetools inspect "${image}:sha-${SHORT}"
+          # shellcheck disable=SC2016 # the backticks are Markdown
+          printf -- '- `%s`\n' "${tags[@]}" >> "$GITHUB_STEP_SUMMARY"
 
   chart:
-    needs: [version, image]
+    needs: [version, manifest]
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -145,39 +217,56 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
       - uses: azure/setup-helm@v4
       - env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: echo "$GHCR_TOKEN" | helm registry login "$REGISTRY" -u "$GHCR_USER" --password-stdin
       - env:
-          SHORT: ${{ needs.version.outputs.short }}
-          RELEASE: ${{ needs.version.outputs.release }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          publish() {
-            helm package charts/ursa-node --version "$1" --app-version "$2" --destination "$RUNNER_TEMP"
-            helm push "$RUNNER_TEMP/ursa-node-$1.tgz" "oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/charts"
-          }
-          publish "0.0.0-${SHORT}" "sha-${SHORT}"
-          if [[ "$RELEASE" == "true" ]]; then
-            publish "$VERSION" "$VERSION"
-          fi
+          mkdir -p dist
+          helm package charts/ursa-node --version "$VERSION" --app-version "$VERSION" --destination dist
+          helm push "dist/ursa-node-${VERSION}.tgz" "oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/charts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ursa-node-chart
+          path: dist/*.tgz
 
-  tag:
-    needs: [version, image, chart]
+  # The GitHub release creates the tag, so the next run's version starts from it.
+  release:
+    needs: [version, chart]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ursa-node-chart
+          path: dist
       - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag --annotate "$TAG" --message "ursa-node ${TAG#node-v}" "$GITHUB_SHA"
-          git push origin "refs/tags/$TAG"
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          {
+            bash scripts/next-version.sh node --notes
+            echo "### Install"
+            echo
+            echo '```sh'
+            echo "helm install ursa-node oci://ghcr.io/${owner}/charts/ursa-node --version ${VERSION} --set existingSecret=<secret> ..."
+            echo "docker pull ghcr.io/${owner}/ursa-node:${VERSION}"
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" dist/*.tgz --target "$SHA" --title "Ursa node ${VERSION}" --notes-file notes.md

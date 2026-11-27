@@ -3,6 +3,7 @@
 # last tag. Prints `release=true|false`, `version=X.Y.Z`, `tag=<prefix>X.Y.Z`, `level=…`.
 #
 #   scripts/next-version.sh node|windows|android [--force auto|patch|minor|major]
+#   scripts/next-version.sh node|windows|android --notes    # Markdown release notes instead
 #
 # feat → minor, any other type that ships (fix, perf, revert, or no type) → patch,
 # `type!:` or a BREAKING CHANGE footer → major. docs/chore/ci/test/style/build/refactor ship
@@ -12,9 +13,11 @@ set -euo pipefail
 product="${1:?product: node, windows or android}"
 shift
 force=auto
-if [[ "${1:-}" == "--force" ]]; then
-  force="${2:?--force needs auto|patch|minor|major}"
-fi
+notes=false
+case "${1:-}" in
+  --force) force="${2:?--force needs auto|patch|minor|major}" ;;
+  --notes) notes=true ;;
+esac
 
 case "$product" in
   node)
@@ -46,13 +49,47 @@ fi
 
 mapfile -t commits < <(git rev-list --no-merges "$range" -- "${paths[@]}")
 
+if [[ "$notes" == true ]]; then
+  # The commits that ship, newest first, grouped the way the version bump reads them (a commit
+  # without a Conventional Commits type ships as a patch, so it is listed too).
+  if ((${#commits[@]} == 0)); then
+    echo "No changes to this product since ${last:-the beginning}."
+    exit 0
+  fi
+  scope='(\([^)]*\))?'
+  re_breaking="^[a-zA-Z]+${scope}!:" re_feat="^feat${scope}:" re_fix="^(fix|perf|revert)${scope}:" re_typed="^[a-zA-Z]+${scope}:"
+  declare -A groups=()
+  for c in "${commits[@]}"; do
+    subject="$(git log -1 --format=%s "$c")"
+    if [[ "$subject" =~ $re_breaking ]] || git log -1 --format=%B "$c" | grep -Eq '^BREAKING[ -]CHANGE:'; then
+      group=breaking
+    elif [[ "$subject" =~ $re_feat ]]; then
+      group=features
+    elif [[ "$subject" =~ $re_fix ]]; then
+      group=fixes
+    elif [[ "$subject" =~ $re_typed ]]; then
+      continue # housekeeping ships nothing
+    else
+      group=other
+    fi
+    groups[$group]+="- $(sed -E 's/^[a-zA-Z]+(\([^)]*\))?!?: *//' <<<"$subject") (${c:0:7})"$'\n'
+  done
+  for group in breaking features fixes other; do
+    case "$group" in
+      breaking) title="Breaking changes" ;; features) title=Features ;; fixes) title=Fixes ;; other) title="Other changes" ;;
+    esac
+    if [[ -n "${groups[$group]:-}" ]]; then printf '### %s\n\n%s\n' "$title" "${groups[$group]}"; fi
+  done
+  exit 0
+fi
+
 level=none
 if ((${#commits[@]} > 0)); then
   subjects="$(git log --no-walk=unsorted --format='%s' "${commits[@]}")"
   bodies="$(git log --no-walk=unsorted --format='%B' "${commits[@]}")"
   housekeeping='^(docs|chore|ci|test|style|build|refactor)(\([^)]*\))?:'
   if grep -Evq "$housekeeping" <<<"$subjects"; then
-    level=patch
+    level="patch"
   fi
   if [[ "$level" != none ]] && grep -Eq '^feat(\([^)]*\))?:' <<<"$subjects"; then
     level=minor
