@@ -1,0 +1,10 @@
+# CI's secret scan (gitleaks, in ci.yml) reads this from the repository root.
+# Every default rule applies, everywhere but in lockfiles: those list package names and checksums,
+# never credentials, and a crate named `libcrux-secrets` reads to the generic API-key rule as one.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Lockfiles: package names and checksums"
+paths = ['''(^|/)(Cargo|bun)\.lock$''']
