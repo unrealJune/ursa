@@ -17,7 +17,7 @@ cargo run --release [--features aws-lc] [-- --quick]
 ```
 
 Prints interoperability checks (and exits non-zero if any fails), then timings and sizes. CI
-(`.github/workflows/s3-pq.yml`) runs it on Linux x86-64 and arm64, macOS (Apple silicon) and
+ran it (the spike workflows have since been retired) on Linux x86-64 and arm64, macOS (Apple silicon) and
 Windows, runs it as WebAssembly under wasmtime, and builds it for iOS, Android and the browser.
 
 ## Libraries compared

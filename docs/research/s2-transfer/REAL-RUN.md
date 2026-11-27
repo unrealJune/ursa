@@ -21,7 +21,8 @@ can pull bytes from it or stop it, so do not leave it running.
 
 ## 1. Get the binary
 
-From the latest successful **S2 binaries** run (`gh run list --workflow s2-binaries.yml`):
+Build it with `cargo build --release` in this directory (add `--target <triple>` for the
+machines below; the static Linux builds need `musl-tools`):
 
 | Machine | Artifact | Binary |
 | --- | --- | --- |

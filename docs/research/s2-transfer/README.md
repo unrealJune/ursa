@@ -114,8 +114,7 @@ What it shows:
 ## Real nodes: five pods on Buttercup (2026-11-23)
 
 Five `s2 serve` pods on Buttercup, June's three-machine k3s cluster at home (Cilium, so each
-pod is behind the cluster's NAT and then the home router's). Manifest and loader in
-[k8s/](k8s/). Two clients, one at a time. Files: [results/buttercup](results/buttercup/).
+pod is behind the cluster's NAT and then the home router's). Two clients, one at a time. Files: [results/buttercup](results/buttercup/).
 
 | Client | Relays | Paths | Best single node | fixed | race | **pull** |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -143,9 +142,7 @@ pod is behind the cluster's NAT and then the home router's). Manifest and loader
    same three machines; the pull scheduler took 66 Mbit/s from the slow one and ~200 from the
    others, as designed.
 
-The nodes and the relay token: the token was copied from `trail-stash`'s Secret into
-`ursa-s2/s2-relay` (removed with the namespace) and into the repo's `S2_RELAY_TOKEN` Actions
-secret, which `s2-remote-client.yml` uses.
+The relay token for these runs came from an Actions secret, not from this repository.
 
 ## Still owed
 

@@ -431,18 +431,18 @@ suite runs against each, and the app does not change between them.
 | S0 | What Ente gets right | Notes on Ente's backup edge cases (permissions, limited library, Live Photos, edits, HEIC/RAW, duplicates), timeline/album UX and key layout, written into this repo |
 | S1 | Chunk size, stripe size and `k`/`n` vs throughput | FastCDC + encrypt + RS-code + hash a 4 GB video on a phone-class ARM core and a desktop; table of GB/s by stripe size and code, chunking and cipher costs, degraded reads |
 | S2 | iroh bulk throughput | Parallel fetch from 6 nodes: loopback ceiling, throttled home-like uplinks, then our own nodes over the real internet; goodput by read strategy |
-| S3 | PQ libraries | **Done 2026-11-23**: libcrux for X-Wing and ML-DSA-65 everywhere (builds for iOS, Android, browser); see `spikes/s3-pq` |
+| S3 | PQ libraries | **Done 2026-11-23**: libcrux for X-Wing and ML-DSA-65 everywhere (builds for iOS, Android, browser); see `docs/research/s3-pq` |
 | S4 | PQ transport | Can iroh's rustls config take `X25519MLKEM768`? Patch size if not |
 | S5 | iOS photo upload | How much a `BGProcessingTask` + background `URLSession` upload can move per night, and whether it must go over HTTP to the home node |
 
-**S1 done (2026-11-23), except a real-phone run.** `spikes/s1-codec`, results on Apple
+**S1 done (2026-11-23), except a real-phone run.** `docs/research/s1-codec`, results on Apple
 silicon, Linux arm64/x86-64, Windows and the laptop. The CPU is never the bottleneck: one Apple
 M2 core writes 4-of-6 at ~1 GB/s and reads at 1.4 GB/s, against home uplinks of 0.02–1 Gbit/s.
 Decided: aws-lc-rs AES-256-GCM (fastest on Apple silicon and x86, level with ring on Neoverse, and it ships ML-KEM; RustCrypto's ran in software on ARM until its cfg flags were turned on); 8 MiB stripes,
 4-of-6, coded in 256 KiB column slices; BLAKE3 shard ids, which are the largest cost on ARM.
-Details and tables: `spikes/s1-codec/README.md`.
+Details and tables: `docs/research/s1-codec/README.md`.
 
-**S2 (2026-11-23): strategies measured, real-internet run pending.** `spikes/s2-transfer`. iroh
+**S2 (2026-11-23): strategies measured, real-internet run pending.** `docs/research/s2-transfer`. iroh
 carries 2.2–2.4 Gbit/s per connection on loopback, so the protocol is not the limit at home
 speeds. Against six throttled uplinks (100/50/40/20/200/8 Mbit/s), the pull scheduler reached
 197 Mbit/s (theory: 236), racing `k + 1` 148, a fixed assignment 74, the best single host 188.
@@ -452,9 +452,9 @@ or slowed to a trickle. Decided: pull scheduling with rate-based hedging, at lea
 flight, a hot cache on the home node, our own relays. Real nodes (five pods on Buttercup): an internet client got direct paths
 through two NATs and read at 841 Mbit/s; n0's public relays broke both the data path and hole
 punching; on the home LAN the pods were only reachable through our relay. Still owed: nodes in
-several homes. Details: `spikes/s2-transfer/README.md`.
+several homes. Details: `docs/research/s2-transfer/README.md`.
 
-**S3 done (2026-11-23).** `spikes/s3-pq`. RustCrypto, libcrux and aws-lc-rs all interoperate
+**S3 done (2026-11-23).** `docs/research/s3-pq`. RustCrypto, libcrux and aws-lc-rs all interoperate
 from the same seeds, and every operation is under 2 ms everywhere, so portability decided it:
 aws-lc-rs cannot build for the browser, which the web reader needs. Decided: libcrux for X-Wing
 and ML-DSA-65 on every platform, `ed25519-dalek` for Ed25519, aws-lc-rs kept for bulk AES-GCM on

@@ -7,9 +7,9 @@ size, code, cipher and chunking should Ursa use?
 cargo run --release -- [--quick] [--json out.json]
 ```
 
-CI runs it on Linux x86-64, Linux arm64, macOS (Apple silicon, the nearest thing to an iPhone)
-and Windows, and builds an `aarch64-linux-android` binary for a real phone
-(`.github/workflows/s1-codec.yml`). To run it on a phone:
+The results below came from CI runs on Linux x86-64, Linux arm64, macOS (Apple silicon, the
+nearest thing to an iPhone) and Windows (the spike workflows have since been retired). To run it
+on a phone, build it for `aarch64-linux-android` with the NDK and:
 
 ```sh
 adb push s1-codec /data/local/tmp/ && adb shell 'cd /data/local/tmp && chmod +x s1-codec && ./s1-codec --quick'
