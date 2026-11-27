@@ -31,6 +31,10 @@ struct Inner {
     /// Serialises head compare-and-set.
     heads: Mutex<()>,
     uptime: Mutex<Uptime>,
+    /// The most this node may store, all accounts together (`URSA_CAPACITY`). A bucket has no
+    /// size of its own, so without this an S3 node reports none and devices treat it as
+    /// unbounded; on disk it caps the filesystem's own size.
+    capacity: Option<u64>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -58,6 +62,7 @@ impl Node {
                 usage: Mutex::new(usage),
                 heads: Mutex::new(()),
                 uptime: Mutex::new(uptime),
+                capacity: None,
             }),
         };
         // Extend the current span once a minute, so a stop shows as a gap.
@@ -77,6 +82,14 @@ impl Node {
             }
         });
         Ok(node)
+    }
+
+    /// Sets [`Inner::capacity`]. Before the node is shared (cloned) only.
+    pub fn with_capacity(mut self, capacity: Option<u64>) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.capacity = capacity;
+        }
+        self
     }
 
     pub async fn claimed(&self) -> bool {
@@ -100,6 +113,7 @@ impl Node {
         };
         let usage = self.inner.usage.lock().await;
         let used = account.and_then(|a| usage.get(a).copied()).unwrap_or(0);
+        let stored: u64 = usage.values().sum();
         let grants = if role == Role::Owner {
             self.inner
                 .grants
@@ -120,11 +134,10 @@ impl Node {
             u.beat(now_ms());
             u.fraction(now_ms())
         };
-        let (disk_total_bytes, disk_free_bytes) =
-            match (role == Role::Owner).then(|| self.inner.store.disk_space()).flatten() {
-                Some((t, f)) => (Some(t), Some(f)),
-                None => (None, None),
-            };
+        let (disk_total_bytes, disk_free_bytes) = match role {
+            Role::Owner => space(self.inner.store.disk_space(), self.inner.capacity, stored).unzip(),
+            _ => (None, None),
+        };
         NodeInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             backend: self.inner.store.kind().to_string(),
@@ -347,6 +360,17 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// A claim code: 20 random characters from an unambiguous alphabet (~100 bits).
+/// The space an owner sees: the filesystem's (disk backend), the configured capacity (a
+/// bucket), or the smaller of the two, as (total, free). `stored` is every account's bytes here.
+fn space(disk: Option<(u64, u64)>, capacity: Option<u64>, stored: u64) -> Option<(u64, u64)> {
+    match (disk, capacity) {
+        (Some(d), None) => Some(d),
+        (Some((total, free)), Some(cap)) => Some((total.min(cap), free.min(cap.saturating_sub(stored)))),
+        (None, Some(cap)) => Some((cap, cap.saturating_sub(stored))),
+        (None, None) => None,
+    }
+}
+
 pub fn new_claim_code() -> String {
     const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
     let mut bytes = [0u8; 20];
@@ -362,4 +386,28 @@ pub fn check_claim_code(code: &str) -> Result<()> {
         bail!("a claim code cannot contain '@' or spaces");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::space;
+
+    const G: u64 = 1_000_000_000;
+
+    #[test]
+    fn a_bucket_reports_its_capacity() {
+        assert_eq!(space(None, None, 10 * G), None);
+        assert_eq!(space(None, Some(500 * G), 120 * G), Some((500 * G, 380 * G)));
+        // Over capacity (it was lowered): nothing free, never an underflow.
+        assert_eq!(space(None, Some(100 * G), 120 * G), Some((100 * G, 0)));
+    }
+
+    #[test]
+    fn a_disk_reports_itself_or_the_cap() {
+        assert_eq!(space(Some((2000 * G, 800 * G)), None, 0), Some((2000 * G, 800 * G)));
+        // The cap is the binding limit.
+        assert_eq!(space(Some((2000 * G, 800 * G)), Some(500 * G), 100 * G), Some((500 * G, 400 * G)));
+        // The disk is fuller than the cap allows for.
+        assert_eq!(space(Some((2000 * G, 50 * G)), Some(500 * G), 100 * G), Some((500 * G, 50 * G)));
+    }
 }

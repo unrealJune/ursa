@@ -153,7 +153,8 @@ pub struct NodeInfo {
     /// Fraction of the last 30 days (or since it first ran) the node was up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub up_30d: Option<f64>,
-    /// Owners only, disk backend: the disk's size and free space.
+    /// Owners only: the space for planning, the disk's size and free space, capped by the node's
+    /// configured capacity (or that capacity alone, for a bucket).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_total_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

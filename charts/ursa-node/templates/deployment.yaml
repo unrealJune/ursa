@@ -66,6 +66,10 @@ spec:
               value: "8080"
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
+            {{- with .Values.capacity }}
+            - name: URSA_CAPACITY
+              value: {{ . | quote }}
+            {{- end }}
             {{- if eq .Values.store "s3" }}
             - name: URSA_S3_ENDPOINT
               value: {{ .Values.s3.endpoint | quote }}

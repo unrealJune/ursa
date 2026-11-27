@@ -59,6 +59,12 @@ struct Args {
     #[arg(long, env = "URSA_ADVERTISE", value_delimiter = ',')]
     advertise: Vec<SocketAddr>,
 
+    /// The most this node may store, all accounts together: bytes, or with a unit (`500G`,
+    /// `500Gi`, `2T`). Set it for the s3 backend, where a bucket has no size for devices to plan
+    /// with; on disk it caps the filesystem's size.
+    #[arg(long, env = "URSA_CAPACITY", value_parser = parse_size)]
+    capacity: Option<u64>,
+
     /// Plain-HTTP health endpoint for probes (`GET /` answers `ok`). 0 disables it.
     #[arg(long, env = "URSA_HEALTH_PORT", default_value_t = 8080)]
     health_port: u16,
@@ -96,7 +102,17 @@ async fn main() -> Result<()> {
         }
         None => new_claim_code(),
     };
-    let node = Node::new(store, secret.public().to_string(), claim_code.clone()).await.context("open the store")?;
+    let node = Node::new(store, secret.public().to_string(), claim_code.clone())
+        .await
+        .context("open the store")?
+        .with_capacity(args.capacity);
+    match args.capacity {
+        Some(c) => tracing::info!(capacity_bytes = c, "capacity"),
+        None if args.store == "s3" => {
+            tracing::warn!("no URSA_CAPACITY: devices will treat this bucket as unbounded")
+        }
+        None => {}
+    }
 
     let mut builder = Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
     if !args.relay.is_empty() {
@@ -191,4 +207,48 @@ async fn terminate() {
 #[cfg(not(unix))]
 async fn terminate() {
     std::future::pending::<()>().await
+}
+
+/// `500G` (10^9), `500Gi` (2^30), `2T`, `1.5Ti`, or plain bytes.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let n: f64 = num.parse().map_err(|_| format!("not a size: {s:?}"))?;
+    let mult: f64 = match unit.trim().trim_end_matches(['B', 'b']) {
+        "" => 1.0,
+        "K" | "k" => 1e3,
+        "M" => 1e6,
+        "G" => 1e9,
+        "T" => 1e12,
+        "P" => 1e15,
+        "Ki" => 1024f64,
+        "Mi" => 1024f64.powi(2),
+        "Gi" => 1024f64.powi(3),
+        "Ti" => 1024f64.powi(4),
+        "Pi" => 1024f64.powi(5),
+        u => return Err(format!("unknown unit {u:?} in {s:?} (use K, M, G, T, P or Ki, Mi, Gi, Ti, Pi)")),
+    };
+    let bytes = n * mult;
+    if !bytes.is_finite() || bytes < 1.0 || bytes > u64::MAX as f64 {
+        return Err(format!("not a usable size: {s:?}"));
+    }
+    Ok(bytes as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_size;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("1000"), Ok(1000));
+        assert_eq!(parse_size("500G"), Ok(500_000_000_000));
+        assert_eq!(parse_size("500GB"), Ok(500_000_000_000));
+        assert_eq!(parse_size("500Gi"), Ok(500 * (1 << 30)));
+        assert_eq!(parse_size(" 1.5Ti "), Ok(3 * (1u64 << 40) / 2));
+        assert!(parse_size("0").is_err());
+        assert!(parse_size("lots").is_err());
+        assert!(parse_size("5X").is_err());
+    }
 }

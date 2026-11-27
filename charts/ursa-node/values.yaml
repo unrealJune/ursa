@@ -13,6 +13,11 @@ replicaCount: 1
 # Where objects live: `s3` (any S3-compatible store, e.g. SeaweedFS) or `disk` (a volume).
 store: s3
 
+# The most this node may store, all accounts together, e.g. `500Gi` or `2T`. Set it for s3: a
+# bucket has no size, so without it devices see the node as unbounded and plan (protection,
+# Usage, what friends can be given) against that. With store: disk it caps the volume's size.
+capacity: ""
+
 s3:
   # Path-style; http is fine inside a cluster.
   endpoint: ""
