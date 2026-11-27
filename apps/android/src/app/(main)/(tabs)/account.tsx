@@ -6,7 +6,7 @@ import { Alert, View } from 'react-native';
 
 import { useLibrary } from '@/core/library';
 import { setPrefs, signOut, useSession } from '@/core/session';
-import { telemetryEnabled, telemetryId } from '@/core/telemetry';
+import { setTelemetryConsent, telemetryAvailable, telemetryConsent, telemetryId } from '@/core/telemetry';
 import { shortId } from '@/format';
 import { useTheme } from '@/theme';
 import { Divider, Group, Icon, ListRow, Page, SectionHeader, Switch, TopBar, Txt } from '@/ui/kit';
@@ -17,8 +17,11 @@ export default function Account() {
   const count = useLibrary((s) => s.items.length);
   const { c } = useTheme();
   const [telemetry, setTelemetry] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState(false);
   useEffect(() => {
-    if (telemetryEnabled) telemetryId().then(setTelemetry);
+    if (!telemetryAvailable) return;
+    telemetryId().then(setTelemetry);
+    telemetryConsent().then(setDiagnostics);
   }, []);
   if (!status) return null;
   const name = status.name || 'Your account';
@@ -76,14 +79,23 @@ export default function Account() {
           <ListRow icon="smartphone" title="Device id" subtitle={shortId(status.deviceId)} />
           <Divider inset={56} />
           <ListRow icon="info-outline" title="Version" subtitle={Constants.expoConfig?.version ?? ''} />
-          {telemetryEnabled && telemetry ? (
+          {telemetryAvailable && telemetry ? (
             <>
               <Divider inset={56} />
               <ListRow
                 icon="monitor-heart"
-                title="Telemetry ID"
-                subtitle={`${telemetry} · this build sends diagnostics to its developer`}
+                title="Send diagnostics"
+                subtitle={`Errors and timings, never file names, contents or keys · ID ${telemetry}`}
                 onPress={() => Clipboard.setStringAsync(telemetry)}
+                trailing={
+                  <Switch
+                    value={diagnostics}
+                    onChange={(v) => {
+                      setDiagnostics(v);
+                      void setTelemetryConsent(v);
+                    }}
+                  />
+                }
               />
             </>
           ) : null}

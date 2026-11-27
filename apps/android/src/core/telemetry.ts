@@ -5,8 +5,9 @@
  * phone; `ursa.layer` tells them apart (`js` here, `core` there).
  *
  * Hand-rolled OTLP/JSON over fetch, as Street Cryptid found the OpenTelemetry JS SDK misbehaves
- * under Hermes. Inert when the build names no endpoint. Nothing here reads file names or
- * contents: it sends what the code passes it.
+ * under Hermes. Inert when the build names no endpoint, and until the user turns diagnostics on
+ * in the Account tab (builds that are not releases set EXPO_PUBLIC_TELEMETRY_DEFAULT=on and start
+ * with it on). Nothing here reads file names or contents: it sends what the code passes it.
  */
 import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
@@ -15,7 +16,9 @@ import { Ursa } from 'ursa-core';
 
 /** Read statically: Metro inlines `process.env.EXPO_PUBLIC_*` only when it is written out. */
 const ENDPOINT = process.env.EXPO_PUBLIC_OTEL_ENDPOINT?.trim().replace(/\/+$/, '') || null;
+const DEFAULT_ON = process.env.EXPO_PUBLIC_TELEMETRY_DEFAULT === 'on';
 const ID_KEY = 'ursa.telemetry-id';
+const CONSENT_KEY = 'ursa.telemetry-consent';
 const MAX_QUEUED = 500;
 const BATCH = 100;
 
@@ -31,8 +34,29 @@ let queue: Record_[] = [];
 let timer: ReturnType<typeof setTimeout> | null = null;
 let sending = false;
 let installed = false;
+/** Sending: the user agreed. The core, once configured, keeps exporting until the app restarts. */
+let active = false;
 
-export const telemetryEnabled = ENDPOINT !== null;
+/** Whether this build can send diagnostics at all (it names a collector). */
+export const telemetryAvailable = ENDPOINT !== null;
+
+/** The user's answer, or the build's default before they have given one. */
+export async function telemetryConsent(): Promise<boolean> {
+  const v = await SecureStore.getItemAsync(CONSENT_KEY);
+  return v === null ? DEFAULT_ON : v === '1';
+}
+
+export async function setTelemetryConsent(on: boolean): Promise<void> {
+  await SecureStore.setItemAsync(CONSENT_KEY, on ? '1' : '0');
+  if (on) {
+    await startTelemetry();
+  } else if (active) {
+    log('INFO', 'diagnostics turned off');
+    await flush();
+    active = false;
+    queue = [];
+  }
+}
 
 /** This install's telemetry id: shown in the Account tab, and what to search the collector for. */
 export async function telemetryId(): Promise<string> {
@@ -51,7 +75,9 @@ export async function telemetryId(): Promise<string> {
  * core starts, so the core's start-up is recorded too.
  */
 export async function startTelemetry(): Promise<void> {
-  if (!ENDPOINT || installed) return;
+  if (!ENDPOINT || active || !(await telemetryConsent())) return;
+  active = true;
+  if (installed) return;
   installed = true;
   const id = await telemetryId();
   try {
@@ -71,7 +97,7 @@ export async function startTelemetry(): Promise<void> {
 
 /** Records one log line (dropped when telemetry is off). */
 export function log(severity: Severity, body: string, attrs: Attrs = {}): void {
-  if (!ENDPOINT) return;
+  if (!ENDPOINT || !active) return;
   queue.push({
     timeUnixNano: `${Date.now()}000000`,
     severityText: severity,
