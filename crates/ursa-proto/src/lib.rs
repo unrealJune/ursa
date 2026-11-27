@@ -26,6 +26,7 @@ use ursa_core::account::{AccountId, DeviceCert};
 use ursa_core::head::Head;
 
 pub mod link;
+pub mod relays;
 
 pub const ALPN: &[u8] = b"ursa/node/2";
 /// Headers are small (a head with its keys is ~10 KB); this bounds what a peer can make us

@@ -4,7 +4,7 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
-# The repository is private, so its images are too: name a docker-registry Secret for GHCR.
+# The published image is public; set this only for a private mirror.
 imagePullSecrets: []
 
 # One node identity per deployment. Two pods would answer for the same endpoint id.
@@ -27,7 +27,8 @@ s3:
 #   URSA_CLAIM_CODE        what a new device presents to become an owner (optional; random if unset)
 #   AWS_ACCESS_KEY_ID      S3 credentials (store: s3)
 #   AWS_SECRET_ACCESS_KEY
-#   URSA_RELAY_TOKEN       auth token for the relays below (optional)
+#   URSA_RELAY_TOKEN       auth token for the relays below (optional: released images carry
+#                          one for Ursa's own relays and use it when relayUrls lists only those)
 existingSecret: ""
 
 # Relays to use instead of n0's public ones (S2: those carried almost nothing).

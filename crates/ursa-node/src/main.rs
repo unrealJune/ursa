@@ -106,8 +106,9 @@ async fn main() -> Result<()> {
             .map(|u| u.trim().parse::<RelayUrl>().map_err(|e| anyhow!("bad relay URL {u}: {e}")))
             .collect::<Result<Vec<_>>>()?;
         let mut map = RelayMap::from_iter(urls);
-        if let Ok(token) = std::env::var("URSA_RELAY_TOKEN") {
-            map = map.with_auth_token(token.trim().to_owned());
+        let configured = std::env::var("URSA_RELAY_TOKEN").ok();
+        if let Some(t) = ursa_proto::relays::relay_token(&args.relay, configured.as_deref()) {
+            map = map.with_auth_token(t);
         }
         builder = builder.relay_mode(RelayMode::Custom(map));
     }

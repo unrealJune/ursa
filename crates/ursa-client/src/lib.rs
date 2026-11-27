@@ -120,8 +120,8 @@ impl Device {
                 .map(|u| u.trim().parse::<RelayUrl>().map_err(|e| anyhow!("bad relay URL {u}: {e}")))
                 .collect::<Result<Vec<_>>>()?;
             let mut map = RelayMap::from_iter(urls);
-            if let Some(t) = net.relay_token.as_ref().filter(|t| !t.trim().is_empty()) {
-                map = map.with_auth_token(t.trim().to_owned());
+            if let Some(t) = ursa_proto::relays::relay_token(&net.relays, net.relay_token.as_deref()) {
+                map = map.with_auth_token(t);
             }
             builder = builder.relay_mode(RelayMode::Custom(map));
         }
