@@ -192,11 +192,14 @@ impl LinkHandler {
 
     async fn handle(&self, conn: Connection) -> Result<()> {
         let joiner = conn.remote_id().to_string();
+        tracing::info!(joiner = %&joiner[..10.min(joiner.len())], "link: a device connected");
         let (mut send, mut recv) = conn.accept_bi().await?;
         let hello: Hello = read_header(&mut recv).await?;
+        tracing::info!(name = %hello.name, platform = %hello.platform, "link: a device is asking to join");
         let (code, account, network, now_ms, prompt) = {
             let guard = self.offer.lock().await;
             let Some(o) = guard.as_ref() else {
+                tracing::warn!("link: refused a device: no link offer is open");
                 write_header(&mut send, &Reply::Rejected { reason: "no link offer is open on that device".into() })
                     .await?;
                 send.finish()?;
@@ -207,6 +210,7 @@ impl LinkHandler {
         // This device's own id, as the joiner saw it in the ticket.
         let offerer = code.addr.id.to_string();
         if !constant_eq(hello.proof.as_bytes(), proof(&code.secret, &joiner).as_bytes()) {
+            tracing::warn!("link: refused a device: its proof does not match this offer's code");
             write_header(&mut send, &Reply::Rejected { reason: "wrong link code".into() }).await?;
             send.finish()?;
             return Ok(());
@@ -221,6 +225,7 @@ impl LinkHandler {
             .ok()
             .and_then(|r| r.ok())
             .unwrap_or(false);
+        tracing::info!(accepted, "link: decided");
         let reply = if accepted {
             // One device per code.
             *self.offer.lock().await = None;
@@ -250,8 +255,9 @@ impl LinkHandler {
 
 impl ProtocolHandler for LinkHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        // Warned, not debug: on a phone this is the only trace of a join that never prompted.
         if let Err(e) = self.handle(conn).await {
-            tracing::debug!("link attempt failed: {e:#}");
+            tracing::warn!("link attempt failed: {e:#}");
         }
         Ok(())
     }
