@@ -2,15 +2,15 @@
 # The next release of a product, from the Conventional Commits that touched its paths since its
 # last tag. Prints `release=true|false`, `version=X.Y.Z`, `tag=<prefix>X.Y.Z`, `level=…`.
 #
-#   scripts/next-version.sh node|windows|android [--force auto|patch|minor|major]
-#   scripts/next-version.sh node|windows|android --notes    # Markdown release notes instead
+#   scripts/next-version.sh node|windows|android|macos [--force auto|patch|minor|major]
+#   scripts/next-version.sh node|windows|android|macos --notes    # Markdown release notes instead
 #
 # feat → minor, any other type that ships (fix, perf, revert, or no type) → patch,
 # `type!:` or a BREAKING CHANGE footer → major. docs/chore/ci/test/style/build/refactor ship
 # nothing. The first release of a product is 0.1.0 whatever the level.
 set -euo pipefail
 
-product="${1:?product: node, windows or android}"
+product="${1:?product: node, windows, android or macos}"
 shift
 force=auto
 notes=false
@@ -31,6 +31,10 @@ case "$product" in
   android)
     prefix=android-v
     paths=(crates ':(exclude)crates/ursa-node' ':(exclude)crates/ursa-host' ':(exclude)crates/ursa-cli' Cargo.toml Cargo.lock .cargo apps/android)
+    ;;
+  macos)
+    prefix=macos-v
+    paths=(crates ':(exclude)crates/ursa-node' ':(exclude)crates/ursa-host' ':(exclude)crates/ursa-cli' Cargo.toml Cargo.lock .cargo apps/macos)
     ;;
   *)
     echo "unknown product: $product" >&2

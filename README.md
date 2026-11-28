@@ -19,11 +19,12 @@ Ursa is early software. Formats and protocols can still change between releases.
 | [`crates/ursa-client`](crates/ursa-client) | A device: account session, the pool, coded storage, recovery, linking |
 | [`crates/ursa-node`](crates/ursa-node) | The storage node (disk or any S3-compatible store) |
 | [`crates/ursa-host`](crates/ursa-host) | The process the Windows app drives over stdio |
-| [`crates/ursa-ffi`](crates/ursa-ffi) | `ursa-client` for the Android app, through UniFFI |
+| [`crates/ursa-ffi`](crates/ursa-ffi) | `ursa-client` for the Android and macOS apps, through UniFFI |
 | [`crates/ursa-cli`](crates/ursa-cli) | `ursa`, a device on the command line |
 | [`crates/ursa-telemetry`](crates/ursa-telemetry) | Opt-in developer telemetry (OTLP logs) |
 | [`apps/windows`](apps/windows) | The Windows app (WinUI 3) |
 | [`apps/android`](apps/android) | The Android app (Expo + the Rust core) |
+| [`apps/macos`](apps/macos) | The macOS app (SwiftUI + the Rust core) |
 | [`charts/ursa-node`](charts/ursa-node) | Helm chart for a node |
 | [`docs/design.md`](docs/design.md) | Design, threat model and roadmap |
 | [`docs/research`](docs/research) | The measurements behind the design (codecs, transfer, post-quantum crypto) |
@@ -32,7 +33,7 @@ Ursa is early software. Formats and protocols can still change between releases.
 
 Every release is cut automatically from `main` and published on the
 [Releases page](https://github.com/unrealJune/ursa/releases). Each product has its own version
-and tag: `windows-vX.Y.Z`, `android-vX.Y.Z` and `node-vX.Y.Z`.
+and tag: `windows-vX.Y.Z`, `android-vX.Y.Z`, `macos-vX.Y.Z` and `node-vX.Y.Z`.
 
 ### Windows
 
@@ -44,6 +45,12 @@ Builds are not code-signed yet, so SmartScreen will warn on first run.
 
 Download `Ursa-<version>.apk` from the latest `android-v*` release and install it. Updates are
 not automatic yet: install the new APK over the old one.
+
+### macOS
+
+Download `Ursa-<version>-macos-universal.zip` from the latest `macos-v*` release, open it, and
+move Ursa to Applications (macOS 14 or later, Apple silicon or Intel). Builds are not notarized
+yet: the first time, Control-click Ursa and choose Open. Updates are not automatic yet.
 
 ### A storage node
 

@@ -59,6 +59,15 @@ git tag android-v0.1.0
 commit crates/ursa-node/src/main.rs "feat: node only"
 expect android release=false
 
+# macOS follows the core and its own app, as Android does.
+expect macos release=true version=0.1.0 tag=macos-v0.1.0
+git tag macos-v0.1.0
+commit apps/windows/App.cs "fix: windows again"
+expect macos release=false
+commit apps/macos/Sources/App.swift "feat: mac only"
+expect macos release=true version=0.2.0 level=minor
+expect android release=false
+
 # Breaking changes, by marker and by footer.
 git tag node-v0.3.0
 commit crates/ursa-node/src/main.rs "refactor!: new wire format"

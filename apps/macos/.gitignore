@@ -1,0 +1,8 @@
+# Built by scripts/build-core.sh from crates/ursa-ffi: never committed, so they cannot disagree.
+/Core/
+/Sources/ursa_ffiFFI/ursa_ffiFFI.h
+/Sources/UrsaFFI/ursa_ffi.swift
+# swift build and scripts/bundle.sh
+/.build/
+/dist/
+/.swiftpm/

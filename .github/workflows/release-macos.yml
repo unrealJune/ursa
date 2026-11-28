@@ -1,0 +1,148 @@
+name: Release / macOS app
+
+# Builds the Ursa macOS app (SwiftUI + the Rust core, crate ursa-ffi, through UniFFI) into
+# Ursa.app. When the Conventional Commits since the last `macos-v*` tag ship something
+# (scripts/next-version.sh macos), it publishes `macos-vX.Y.Z` on GitHub Releases:
+#
+#   Ursa-X.Y.Z-macos-universal.zip      Ursa.app for Apple silicon and Intel Macs
+#
+# The app is signed ad hoc, not with a Developer ID, until the repository has one: Gatekeeper
+# asks people to confirm the first launch.
+#
+# A push to main releases only after CI passes on it, and from the commit CI tested. Pull requests
+# that touch the app or the core build it (Apple silicon only, to be quick) and run its tests.
+# A manual run can force a bump.
+
+on:
+  pull_request:
+    paths:
+      - apps/macos/**
+      - crates/ursa-ffi/**
+      - crates/ursa-client/**
+      - crates/ursa-core/**
+      - crates/ursa-proto/**
+      - .github/workflows/release-macos.yml
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release to cut. `auto` follows the Conventional Commits since the last macos tag.
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  version:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.ver.outputs.build }}
+      release: ${{ steps.ver.outputs.release }}
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - id: ver
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          set -euo pipefail
+          out="$(bash scripts/next-version.sh macos --force "$BUMP")"
+          echo "$out"
+          release="$(sed -n 's/^release=//p' <<<"$out")"
+          version="$(sed -n 's/^version=//p' <<<"$out")"
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then release=false; fi
+          build=true
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" && "$release" != "true" ]]; then build=false; fi
+          if [[ "$release" != "true" ]]; then version="${version}-ci.${GITHUB_RUN_NUMBER}"; fi
+          {
+            echo "build=${build}"
+            echo "release=${release}"
+            echo "version=${version}"
+            echo "tag=$(sed -n 's/^tag=//p' <<<"$out")"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      ARCH: ${{ github.ref == 'refs/heads/main' && 'universal' || 'arm64' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos
+          cache-on-failure: 'true'
+      # The default relay token is baked into the core (crates/ursa-proto/src/relays.rs). Pull
+      # requests from forks get no secret and build without.
+      - name: Build Ursa.app
+        env:
+          URSA_DEFAULT_RELAY_TOKEN: ${{ secrets.URSA_RELAY_TOKEN }}
+        run: bash apps/macos/scripts/bundle.sh --version "$VERSION" "$ARCH"
+      - name: Test
+        working-directory: apps/macos
+        run: swift test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ursa-macos
+          path: apps/macos/dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ursa-macos
+          path: dist
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            bash scripts/next-version.sh macos --notes
+            echo "### Install"
+            echo
+            echo "Download \`Ursa-${VERSION}-macos-universal.zip\`, open it, and move Ursa to Applications (macOS 14 or later)."
+            echo "The app is not notarized yet: the first time, Control-click it and choose Open."
+            echo "Updates are not automatic yet: replace the app with the next release."
+          } > notes.md
+          gh release create "$TAG" dist/*.zip --target "$SHA" --title "Ursa for macOS ${VERSION}" --notes-file notes.md
