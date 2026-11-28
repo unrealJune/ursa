@@ -1,0 +1,52 @@
+# Developer tooling for Ursa. `mise install` once, then `mise run env-pull` for the relay token.
+# Rust is not managed here: rustup installs stable, as CI does. The Windows app (.NET) builds on
+# Windows only.
+
+[tools]
+bun = "1.3.14"        # the Android app's package manager (CI: oven-sh/setup-bun, latest)
+node = "24"           # Expo's CLI
+"npm:eas-cli" = "latest"
+shellcheck = "latest" # CI lints every script with it
+actionlint = "1.7.12" # and the workflows (the version CI runs)
+
+[env]
+# Secrets for local builds (URSA_DEFAULT_RELAY_TOKEN), from `mise run env-pull`. Ignored by git.
+_.file = { path = ".env.local", redact = true }
+
+[tasks.env-pull]
+description = "Pull the relay token from EAS into .env.local"
+run = "bash scripts/env-pull.sh"
+
+[tasks."macos:core"]
+description = "Build the Rust core and its Swift bindings for the macOS app"
+run = "bash apps/macos/scripts/build-core.sh"
+env = { DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer" }
+
+[tasks."macos:build"]
+description = "Build apps/macos/dist/Ursa.app (core included)"
+run = "bash apps/macos/scripts/bundle.sh"
+env = { DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer" }
+
+[tasks."macos:run"]
+description = "Build Ursa.app and open it"
+depends = ["macos:build"]
+run = "open apps/macos/dist/Ursa.app"
+
+[tasks."macos:test"]
+description = "The macOS app's tests"
+dir = "apps/macos"
+run = "swift test"
+env = { DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer" }
+
+[tasks."android:core"]
+description = "Build the Rust core and its Kotlin bindings for the Android app"
+run = "bash apps/android/scripts/build-core.sh"
+
+[tasks.lint]
+description = "What CI checks besides the builds: Rust, scripts, workflows, versioning"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --locked --workspace --all-targets -- -D warnings",
+  "shellcheck scripts/*.sh apps/android/scripts/*.sh apps/macos/scripts/*.sh",
+  "actionlint",
+]

@@ -4,3 +4,6 @@ target/
 # .NET build output
 apps/windows/**/bin/
 apps/windows/**/obj/
+
+# Local secrets (scripts/env-pull.sh)
+.env.local
