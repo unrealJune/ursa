@@ -245,6 +245,13 @@ pub trait OfferListener: Send + Sync {
     fn on_request(&self, name: String, platform: String, confirm: String);
 }
 
+/// Whether this build carries a token for Ursa's own relays (release builds do). Without one,
+/// and with none configured, those relays refuse the device and it can reach nothing behind them.
+#[uniffi::export]
+pub fn has_built_in_relay_token() -> bool {
+    ursa_proto::relays::DEFAULT_RELAY_TOKEN.is_some_and(|t| !t.trim().is_empty())
+}
+
 // ---------------------------------------------------------------------------------------------
 // The core
 
@@ -762,6 +769,26 @@ impl UrsaCore {
                 .await?
                 .download(&file_id, &PathBuf::from(out_path), throttled(listener))
                 .await
+        })
+        .await
+    }
+
+    /// Downloads a library folder and everything in it into `out_dir`, as `out_dir/<folder
+    /// name>/…`; returns the folder it wrote. Progress is in bytes.
+    pub async fn download_folder(
+        &self,
+        folder_id: String,
+        out_dir: String,
+        listener: Arc<dyn ProgressListener>,
+    ) -> Res<String> {
+        let inner = self.inner.clone();
+        on_rt(async move {
+            let path = inner
+                .session()
+                .await?
+                .download_folder(&folder_id, &PathBuf::from(out_dir), throttled(listener))
+                .await?;
+            Ok(path.to_string_lossy().into_owned())
         })
         .await
     }

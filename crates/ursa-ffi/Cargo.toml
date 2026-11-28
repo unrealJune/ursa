@@ -1,6 +1,6 @@
 [package]
 name = "ursa-ffi"
-description = "The Ursa device for mobile apps: ursa-client behind a UniFFI interface (Kotlin today)"
+description = "The Ursa device for the Android and macOS apps: ursa-client behind a UniFFI interface (Kotlin and Swift)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 # cdylib: the libursa_ffi.so the Android app loads. lib: lets uniffi-bindgen and tests use it.
+# The macOS app links it statically: apps/macos/scripts/build-core.sh asks for a staticlib.
 [lib]
 name = "ursa_ffi"
 crate-type = ["cdylib", "lib"]
